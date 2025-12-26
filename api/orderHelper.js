@@ -1,10 +1,8 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
 
-/**
- * PROSES CEK STOK & UPDATE STATUS (Core Logic)
- * (Bagian ini TIDAK BERUBAH dari versi sebelumnya)
- */
+// ... (Fungsi processOrderStock BIARKAN TETAP SAMA sprti sebelumnya) ...
+// ... COPY PASTE KODE processOrderStock YANG LAMA DI SINI ...
 async function processOrderStock(orderId) {
     const orderRef = db.collection('orders').doc(orderId);
     
@@ -89,77 +87,71 @@ async function processOrderStock(orderId) {
     });
 }
 
-/**
- * KIRIM NOTIFIKASI SUKSES (Update Fix WA & Tombol Revisi)
- */
+// ... (INI YANG DIPERBAIKI UNTUK WA) ...
 async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
     const snap = await db.collection('orders').doc(orderId).get();
     const data = snap.data();
     
-    // --- PERBAIKAN LOGIKA NOMOR WA ---
-    // 1. Ambil dari phoneNumber user dulu (bersihkan karakter aneh)
-    let hp = data.phoneNumber ? data.phoneNumber.replace(/\D/g, '') : "";
+    // --- LOGIKA WA SUPER KETAT ---
+    let rawHP = data.phoneNumber || "";
+    
+    // 1. Bersihkan semua karakter selain angka
+    let cleanHP = rawHP.replace(/\D/g, ''); 
 
-    // 2. Kalau kosong atau kependekan (di bawah 10 digit), baru cek Note
-    if (hp.length < 10 && data.items[0]?.note) {
-        const numbersInNote = data.items[0].note.replace(/\D/g, '');
-        // HANYA AMBIL jika panjangnya masuk akal (10-15 digit)
-        // Ini mencegah angka "15442" dianggap nomor HP
-        if (numbersInNote.length >= 10 && numbersInNote.length <= 15) {
-            hp = numbersInNote;
+    // 2. Jika kosong/pendek, coba cari di Note item pertama
+    if (cleanHP.length < 9 && data.items[0]?.note) {
+        let noteNum = data.items[0].note.replace(/\D/g, '');
+        // Validasi: Nomor HP Indo minimal 9-13 digit
+        if (noteNum.length >= 9 && noteNum.length <= 15) {
+            cleanHP = noteNum;
         }
     }
 
-    // 3. Format ke 62 (Indonesia)
-    if (hp.startsWith('0')) hp = '62' + hp.slice(1);
-    if (hp.startsWith('8')) hp = '62' + hp; // Jaga-jaga user ngetik 812...
+    // 3. Format Prefix (08 -> 628)
+    if (cleanHP.startsWith('0')) {
+        cleanHP = '62' + cleanHP.slice(1);
+    } else if (cleanHP.startsWith('8')) {
+        cleanHP = '62' + cleanHP;
+    }
 
-    // 4. Buat Link (Jika HP kosong, link WA akan membuka daftar kontak)
+    // 4. Validasi Akhir: Jika formatnya aneh, kosongkan saja biar link WA ngebuka Contact Picker
+    if (cleanHP.length < 10 || !cleanHP.startsWith('62')) {
+        cleanHP = ""; 
+    }
+
+    // Pesan
     let msg = `Halo, Pesanan *${orderId}* Sukses!\n\n`;
     data.items.forEach(i => {
-        msg += `📦 ${i.name}\n`;
+        msg += `📦 *${i.name}*\n`;
         if(i.data && Array.isArray(i.data)) msg += `${i.data.join('\n')}\n\n`;
         else msg += `-\n\n`;
     });
     msg += `Terima Kasih!`;
 
-    const url = hp ? `https://wa.me/${hp}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
+    // Jika cleanHP ada isinya, dia akan direct chat. Jika kosong, dia akan minta pilih kontak.
+    const url = cleanHP ? `https://wa.me/${cleanHP}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
     
-    // --- TOMBOL NOTIFIKASI ---
     const keyboard = [
         [{ text: "📲 Chat WA User", url: url }],
-        // FITUR BARU: TOMBOL REVISI (UPDATE KONTEN)
         [{ text: "🛠 REVISI / EDIT DATA", callback_data: `REVISI_${orderId}` }]
     ];
 
-    await sendMessage(chatId, `✅ <b>ORDER SELESAI (${type})</b>\nID: ${orderId}\nStatus: Success (Dikirim ke Web)\n\n👇 <b>Opsi Lanjutan:</b>`, { 
+    await sendMessage(chatId, `✅ <b>ORDER SELESAI (${type})</b>\nID: ${orderId}\nStatus: Success\n\n👇 <b>Opsi Lanjutan:</b>`, { 
         reply_markup: { inline_keyboard: keyboard } 
     });
 }
 
-/**
- * TAMPILKAN MENU INPUT/EDIT (Update: Bisa untuk Revisi)
- */
+// ... (Fungsi showManualInputMenu BIARKAN TETAP SAMA) ...
 async function showManualInputMenu(chatId, orderId, items) {
     let msg = `📋 <b>INPUT / EDIT DATA PRODUK</b>\nOrder ID: <code>${orderId}</code>\n\nPilih item yang ingin diisi/diubah:\n`;
     const kb = [];
-    
     items.forEach((item, i) => {
         const ready = (item.data && Array.isArray(item.data) && item.data.length > 0);
-        
-        // Tampilan Status di Text
         msg += `\n${i+1}. ${item.name} [${ready ? '✅ TERISI' : '❌ KOSONG'}]`;
-        
-        // PERBAIKAN: Tombol selalu muncul.
-        // Jika kosong -> "✏️ ISI"
-        // Jika isi -> "📝 UBAH" (Fitur Update Konten)
         const btnText = ready ? `📝 UBAH DATA: ${item.name.slice(0, 10)}...` : `✏️ ISI DATA: ${item.name.slice(0, 10)}...`;
-        
         kb.push([{ text: btnText, callback_data: `FILL_${orderId}_${i}` }]);
     });
-
     kb.push([{ text: "🚀 SELESAI (KIRIM NOTIF)", callback_data: `DONE_${orderId}` }]);
-    
     await sendMessage(chatId, msg, { reply_markup: { inline_keyboard: kb } });
 }
 
