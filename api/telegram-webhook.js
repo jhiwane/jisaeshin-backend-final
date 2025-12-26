@@ -30,6 +30,7 @@ module.exports = async function(req, res) {
                     let needManual = false;
 
                     for (let i = 0; i < items.length; i++) {
+                        // Skip jika sudah ada isinya
                         if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) continue;
 
                         const item = items[i];
@@ -76,6 +77,7 @@ module.exports = async function(req, res) {
                             }
                         }
 
+                        // JIKA STOK DITEMUKAN: SIMPAN SEBAGAI ARRAY
                         if (stokDiambil.length > 0) {
                             items[i].data = stokDiambil; 
                             items[i].sn = stokDiambil;
@@ -109,7 +111,7 @@ module.exports = async function(req, res) {
                 await sendMessage(chatId, `<span class="tg-spoiler">${secret}</span>`, { parse_mode: 'HTML' });
             }
 
-            // --- TOMBOL DONE (SELESAI & LINK WA) ---
+            // --- TOMBOL DONE & SELESAI ---
             else if (data.startsWith('DONE_')) {
                 const orderId = data.split('_')[1];
                 await db.collection('orders').doc(orderId).update({ status: 'success' });
@@ -118,7 +120,7 @@ module.exports = async function(req, res) {
 
             // --- TOMBOL BALAS KOMPLAIN ---
             else if (data.startsWith('REPLY_COMPLAINT_')) {
-                const orderId = data.split('_')[2] || data.split('_')[1];
+                const orderId = data.split('_')[1];
                 const secret = `COMPLAINT|${orderId}`;
                 await sendMessage(chatId, `🗣 <b>BALAS KOMPLAIN</b>\nKetik balasan Anda untuk pembeli di bawah ini:`, { reply_markup: { force_reply: true } });
                 await sendMessage(chatId, `<span class="tg-spoiler">${secret}</span>`, { parse_mode: 'HTML' });
@@ -142,6 +144,8 @@ module.exports = async function(req, res) {
             if (matchData) {
                 const orderId = matchData[1];
                 const idx = parseInt(matchData[2]);
+                
+                // Konversi teks input jadi Array (Split Enter)
                 const dataArray = text.split('\n').filter(x => x.trim());
 
                 const ref = db.collection('orders').doc(orderId);
@@ -149,15 +153,14 @@ module.exports = async function(req, res) {
                 if (snap.exists) {
                     let items = snap.data().items;
                     if (items[idx]) {
-                        items[idx].data = dataArray; 
+                        items[idx].data = dataArray; // Simpan sebagai array agar web tidak zonk
                         items[idx].sn = dataArray;
                         items[idx].desc = dataArray;
                         items[idx].note = dataArray[0] || 'Manual Input';
                         
                         await ref.update({ items: items });
                         await sendMessage(chatId, `✅ Berhasil menyimpan data untuk: <b>${items[idx].name}</b>`);
-                        // [PENTING] Munculkan kembali menu utama agar admin bisa klik tombol "DONE"
-                        await showMenu(chatId, orderId); 
+                        await showMenu(chatId, orderId);
                     }
                 }
             }
@@ -168,7 +171,7 @@ module.exports = async function(req, res) {
                     complaintReply: text, 
                     hasNewReply: true 
                 });
-                await sendMessage(chatId, `✅ <b>BERHASIL!</b>\nBalasan komplain untuk Order <code>${orderId}</code> sudah tampil di Web pembeli.`);
+                await sendMessage(chatId, `✅ Balasan telah terkirim ke Web User.`);
             }
         }
     } catch (e) {
@@ -203,15 +206,18 @@ async function sendWALink(chatId, orderId) {
     const snap = await db.collection('orders').doc(orderId).get();
     const data = snap.data();
     
+    // Pencarian Nomor WhatsApp
     let hp = data.phoneNumber || "";
     if ((!hp || hp.length < 5) && data.items[0]?.note) {
         const possible = data.items[0].note.replace(/\D/g, '');
         if (possible.length > 9) hp = possible;
     }
 
+    // Format Nomor
     hp = hp.replace(/\D/g, '');
     if (hp.startsWith('0')) hp = '62' + hp.slice(1);
     
+    // Susun Pesan WA
     let waMsg = `Halo, Pesanan *${orderId}* sukses diproses!\n\n`;
     data.items.forEach(i => {
         waMsg += `📦 *${i.name}*\n`;
