@@ -1,52 +1,40 @@
-const { db, admin } = require('./firebaseConfig');
+const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
-
-const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_ID;
-
-async function processOrderInventory(orderId) {
-    const orderRef = db.collection('orders').doc(orderId);
-
-    // Cek status manual dulu
-    let needsManualProcessing = false;
-    let updatedItems = [];
-
-    await db.runTransaction(async (t) => {
-        const doc = await t.get(orderRef);
-        if (!doc.exists) throw "Order not found";
-        const order = doc.data();
-        if (order.status === 'paid' && order.fulfillmentDone) return; 
-
-        updatedItems = [...order.items];
-
-        // Loop items untuk potong stok (Simplified Logic)
-        for (let i = 0; i < updatedItems.length; i++) {
-            let item = updatedItems[i];
-            // Jika manual atau belum ada sistem stok otomatis, flag manual
-            if (item.isManual || item.processType === 'MANUAL') {
-                needsManualProcessing = true;
-            }
-            // (Di sini bisa ditambahkan logika potong stok otomatis jika database produk sudah siap)
-        }
-
-        t.update(orderRef, { status: 'paid', items: updatedItems });
-    });
-
-    // Notif ke Admin
-    if (needsManualProcessing) {
-        let msg = `🔔 <b>ORDER LUNAS (BUTUH PROSES)</b>\nID: <code>${orderId}</code>\n\nItem berikut butuh data manual:\n`;
-        updatedItems.forEach((item, index) => {
-             msg += `\n📦 <b>${item.name}</b> (Qty: ${item.qty})\n👉 <i>Reply:</i> <code>#${index} [data1]</code>\n(Enter untuk data baris berikutnya)\n`;
-        });
-        await sendMessage(ADMIN_CHAT_ID, msg);
-    } else {
-        await sendMessage(ADMIN_CHAT_ID, `✅ <b>ORDER SELESAI</b>\nID: ${orderId}\nSemua stok terkirim.`);
-    }
-}
+const ADMIN_ID = process.env.TELEGRAM_ADMIN_ID || '1383656187';
 
 module.exports = async function(req, res) {
     const { order_id, transaction_status } = req.body;
+    
+    // Syarat status lunas Midtrans
     if (transaction_status === 'capture' || transaction_status === 'settlement') {
-        await processOrderInventory(order_id);
+        try {
+            const orderRef = db.collection('orders').doc(order_id);
+            const doc = await orderRef.get();
+            
+            if (doc.exists) {
+                // 1. Update status di Firebase agar web user melihat status "PAID"
+                await orderRef.update({ status: 'paid' });
+                
+                // 2. Kirim Notifikasi ke Admin Bot agar Admin bisa langsung proses (ACC)
+                const orderData = doc.data();
+                const text = `💰 <b>PEMBAYARAN MIDTRANS LUNAS!</b>\n` +
+                             `--------------------------------\n` +
+                             `ID Order: <code>${order_id}</code>\n` +
+                             `Total: Rp ${orderData.total.toLocaleString()}\n\n` +
+                             `👇 <b>TINDAKAN:</b>\n` +
+                             `Klik tombol di bawah untuk proses stok otomatis atau input data manual.`;
+                
+                await sendMessage(ADMIN_ID, text, {
+                    reply_markup: {
+                        inline_keyboard: [[
+                            { text: "⚡ PROSES ORDER (ACC)", callback_data: `ACC_${order_id}` }
+                        ]]
+                    }
+                });
+            }
+        } catch (error) {
+            console.error("Midtrans Webhook Error:", error);
+        }
     }
     res.status(200).json({ status: 'ok' });
 };
