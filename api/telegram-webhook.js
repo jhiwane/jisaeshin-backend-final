@@ -1,6 +1,6 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
-// Import Otak Utama
+// Import Otak Utama (KODE INI JANGAN DIUBAH, SUDAH OKE)
 const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
 
 module.exports = async function(req, res) {
@@ -17,7 +17,9 @@ module.exports = async function(req, res) {
 
             // 1. TOMBOL ACC (Manual Transfer)
             if (data.startsWith('ACC_')) {
-                const orderId = data.split('_')[1];
+                // Cara ambil ID: Hapus awalan 'ACC_'
+                const orderId = data.replace('ACC_', ''); 
+                
                 await sendMessage(chatId, `⚙️ <b>[MANUAL]</b> Memproses Order ${orderId}...`);
                 
                 const result = await processOrderStock(orderId);
@@ -33,24 +35,27 @@ module.exports = async function(req, res) {
             // 2. INPUT DATA MANUAL
             else if (data.startsWith('FILL_')) {
                 const parts = data.split('_');
+                // Format data: FILL_ORDERID_INDEX
                 const orderId = parts[1];
                 const itemIdx = parts[2];
-                // FORMAT KHUSUS (RefID) UNTUK DIBACA REGEX NANTI
+                
                 const prompt = `✍️ <b>INPUT DATA ITEM</b>\n\nSilakan Reply pesan ini dengan data akun/kode.\n\nRefID: ${orderId}\nIdx: ${itemIdx}`;
                 await sendMessage(chatId, prompt, { reply_markup: { force_reply: true } });
             }
 
-            // 3. BALAS KOMPLAIN
+            // 3. BALAS KOMPLAIN [FIX SYSTEM DISINI]
             else if (data.startsWith('REPLY_COMPLAINT_')) {
-                const orderId = data.split('_')[1];
-                // FORMAT KHUSUS (RefID) UNTUK DIBACA REGEX NANTI
+                // DULU: const orderId = data.split('_')[1]; -> HASILNYA "COMPLAINT" (SALAH)
+                // SEKARANG: Kita replace teks depannya biar sisa ID-nya saja.
+                const orderId = data.replace('REPLY_COMPLAINT_', ''); 
+                
                 const prompt = `💬 <b>BALAS KOMPLAIN</b>\n\nSilakan tulis balasan Anda untuk user.\n\nRefID: ${orderId}\nMode: COMPLAINT_MODE`;
                 await sendMessage(chatId, prompt, { reply_markup: { force_reply: true } });
             }
 
             // 4. FORCE DONE
             else if (data.startsWith('DONE_')) {
-                const orderId = data.split('_')[1];
+                const orderId = data.replace('DONE_', '');
                 await db.collection('orders').doc(orderId).update({ status: 'success' });
                 await sendSuccessNotification(chatId, orderId, "FORCED");
             }
@@ -66,11 +71,11 @@ module.exports = async function(req, res) {
             const replyOrigin = update.message.reply_to_message.text || "";
             const chatId = update.message.chat.id;
 
-            // --- PERBAIKAN REGEX: HANYA AMBIL ID JIKA ADA LABEL 'RefID:' ---
+            // --- REGEX: HANYA AMBIL ID JIKA ADA LABEL 'RefID:' ---
             const idMatch = replyOrigin.match(/RefID:\s*([A-Za-z0-9-]+)/);
             
             if (idMatch) {
-                const orderId = idMatch[1]; // Pasti TRX-XXXX, bukan kata "COMPLAINT"
+                const orderId = idMatch[1]; // Hasilnya pasti ID Transaksi (TRX-...), bukan COMPLAINT
 
                 // SKENARIO 1: INPUT DATA BARANG
                 const idxMatch = replyOrigin.match(/Idx:\s*(\d+)/);
@@ -103,11 +108,16 @@ module.exports = async function(req, res) {
 
                 // SKENARIO 2: BALAS KOMPLAIN (HANYA JIKA ADA MODE COMPLAINT)
                 else if (replyOrigin.includes('Mode: COMPLAINT_MODE')) {
+                    
+                    // Update Database agar muncul di App.jsx
                     await db.collection('orders').doc(orderId).update({
-                        complaintReply: textAdmin, // Ini yang dibaca App.jsx
-                        hasNewReply: true
+                        complaintReply: textAdmin, 
+                        hasNewReply: true,
+                        // Update adminMessage juga sebagai backup agar muncul di history table
+                        adminMessage: "Admin: " + textAdmin 
                     });
-                    await sendMessage(chatId, `✅ <b>Balasan Terkirim!</b>\nUser akan melihat pesan ini di web (Order ${orderId}).`);
+
+                    await sendMessage(chatId, `✅ <b>Balasan Terkirim!</b>\nUser akan melihat pesan ini di detail order web.`);
                 }
             }
         }
