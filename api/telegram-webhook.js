@@ -7,7 +7,9 @@ module.exports = async function(req, res) {
     const update = req.body;
 
     try {
-        // A. HANDLE TOMBOL (CALLBACK)
+        // ==========================================
+        // A. HANDLE TOMBOL (CALLBACK QUERY)
+        // ==========================================
         if (update.callback_query) {
             const query = update.callback_query;
             const data = query.data; 
@@ -18,7 +20,6 @@ module.exports = async function(req, res) {
                 const orderId = data.split('_')[1];
                 await sendMessage(chatId, `⚙️ <b>[MANUAL]</b> Memproses Order ${orderId}...`);
                 
-                // Gunakan Helper yg sama dengan Midtrans
                 const result = await processOrderStock(orderId);
 
                 if (result.success) {
@@ -34,16 +35,16 @@ module.exports = async function(req, res) {
                 const parts = data.split('_');
                 const orderId = parts[1];
                 const itemIdx = parts[2];
-                // FORMAT JELAS UNTUK REGEX
-                const prompt = `✍️ <b>INPUT DATA</b>\nReply pesan ini dengan data (bisa enter).\n\nRefID: ${orderId}\nIdx: ${itemIdx}`;
+                // FORMAT KHUSUS (RefID) UNTUK DIBACA REGEX NANTI
+                const prompt = `✍️ <b>INPUT DATA ITEM</b>\n\nSilakan Reply pesan ini dengan data akun/kode.\n\nRefID: ${orderId}\nIdx: ${itemIdx}`;
                 await sendMessage(chatId, prompt, { reply_markup: { force_reply: true } });
             }
 
             // 3. BALAS KOMPLAIN
             else if (data.startsWith('REPLY_COMPLAINT_')) {
                 const orderId = data.split('_')[1];
-                // FORMAT JELAS UNTUK REGEX (BEDA BARIS)
-                const prompt = `💬 <b>BALAS KOMPLAIN</b>\nReply pesan ini untuk user.\n\nRefID: ${orderId}\nMode: COMPLAINT_MODE`;
+                // FORMAT KHUSUS (RefID) UNTUK DIBACA REGEX NANTI
+                const prompt = `💬 <b>BALAS KOMPLAIN</b>\n\nSilakan tulis balasan Anda untuk user.\n\nRefID: ${orderId}\nMode: COMPLAINT_MODE`;
                 await sendMessage(chatId, prompt, { reply_markup: { force_reply: true } });
             }
 
@@ -57,18 +58,19 @@ module.exports = async function(req, res) {
             return res.status(200).send('ok');
         }
 
+        // ==========================================
         // B. HANDLE REPLY PESAN (TEXT)
+        // ==========================================
         if (update.message && update.message.reply_to_message) {
             const textAdmin = update.message.text;
             const replyOrigin = update.message.reply_to_message.text || "";
             const chatId = update.message.chat.id;
 
-            // --- REGEX PERBAIKAN (POIN 1) ---
-            // Hanya ambil ID jika ada label "RefID:" persis
+            // --- PERBAIKAN REGEX: HANYA AMBIL ID JIKA ADA LABEL 'RefID:' ---
             const idMatch = replyOrigin.match(/RefID:\s*([A-Za-z0-9-]+)/);
             
             if (idMatch) {
-                const orderId = idMatch[1]; // Ini pasti ID (misal TRX-123), bukan "COMPLAINT"
+                const orderId = idMatch[1]; // Pasti TRX-XXXX, bukan kata "COMPLAINT"
 
                 // SKENARIO 1: INPUT DATA BARANG
                 const idxMatch = replyOrigin.match(/Idx:\s*(\d+)/);
@@ -86,7 +88,6 @@ module.exports = async function(req, res) {
                             items[itemIdx].sn = dataArray;
                             items[itemIdx].note = `Manual: ${new Date().toLocaleTimeString()}`;
                         }
-                        // Cek status full
                         const allFilled = items.every(i => i.data && i.data.length > 0);
                         t.update(ref, { items: items, status: allFilled ? 'success' : 'processing' });
                         return allFilled;
@@ -100,20 +101,19 @@ module.exports = async function(req, res) {
                     });
                 }
 
-                // SKENARIO 2: BALAS KOMPLAIN
-                // Cek label "Mode: COMPLAINT_MODE" agar tidak tertukar
+                // SKENARIO 2: BALAS KOMPLAIN (HANYA JIKA ADA MODE COMPLAINT)
                 else if (replyOrigin.includes('Mode: COMPLAINT_MODE')) {
                     await db.collection('orders').doc(orderId).update({
-                        complaintReply: textAdmin,
+                        complaintReply: textAdmin, // Ini yang dibaca App.jsx
                         hasNewReply: true
                     });
-                    await sendMessage(chatId, `✅ Balasan terkirim ke User (Order: ${orderId})`);
+                    await sendMessage(chatId, `✅ <b>Balasan Terkirim!</b>\nUser akan melihat pesan ini di web (Order ${orderId}).`);
                 }
             }
         }
     } catch (e) {
         console.error(e);
-        if(req.body.message) sendMessage(req.body.message.chat.id, `ERROR: ${e.message}`);
+        if(req.body.message) sendMessage(req.body.message.chat.id, `ERROR SYSTEM: ${e.message}`);
     }
     return res.status(200).send('ok');
 };
