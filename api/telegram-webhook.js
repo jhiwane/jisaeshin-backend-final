@@ -1,9 +1,19 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
-// Import Otak Utama (LOGIKA SUDAH DIPERBARUI DI ATAS)
 const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
-// Import Fitur Admin Dashboard
 const { showAdminDashboard, handleDailyReport, handleLowStockCheck } = require('./adminCommands');
+
+// FUNGSI TAMBAHAN UTK MENGHAPUS PESAN (OPSIONAL, AGAR CHAT BERSIH)
+const fetch = require('node-fetch');
+async function deleteMessage(chatId, messageId) {
+    try {
+        await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/deleteMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, message_id: messageId })
+        });
+    } catch(e) {}
+}
 
 module.exports = async function(req, res) {
     const update = req.body;
@@ -13,14 +23,14 @@ module.exports = async function(req, res) {
             const query = update.callback_query;
             const data = query.data; 
             const chatId = query.message.chat.id;
+            const messageId = query.message.message_id; // Kita butuh ini untuk hapus pesan
 
-            // --- 1. FITUR ADMIN DASHBOARD ---
+            // ... (KODE ADMIN DASHBOARD TETAP SAMA) ...
             if (data === 'ADMIN_MENU') await showAdminDashboard(chatId);
             else if (data === 'ADMIN_REPORT') await handleDailyReport(chatId);
             else if (data === 'ADMIN_STOCK') await handleLowStockCheck(chatId);
 
-            // --- 2. FITUR TRANSAKSI ---
-            
+            // ... (KODE TRANSAKSI LAIN TETAP SAMA) ...
             else if (data.startsWith('ACC_')) {
                 const orderId = data.replace('ACC_', ''); 
                 await sendMessage(chatId, `⚙️ <b>[MANUAL]</b> Memproses Order ${orderId}...`);
@@ -31,43 +41,52 @@ module.exports = async function(req, res) {
                     await showManualInputMenu(chatId, orderId, result.items);
                 }
             }
-            
-            // FITUR BARU: TOMBOL REVISI (MUNCULKAN MENU EDIT)
+
+            // === [FIX MASALAH 3: FITUR TOLAK/REJECT] ===
+            else if (data.startsWith('REJECT_')) {
+                const orderId = data.replace('REJECT_', '');
+                
+                // 1. Update Database jadi 'failed' agar Web berhenti proses
+                await db.collection('orders').doc(orderId).update({ status: 'failed' });
+                
+                // 2. Hapus pesan notifikasi "Menunggu ACC" biar chat bersih (Efek "Hilang")
+                await deleteMessage(chatId, messageId);
+
+                // 3. Kirim konfirmasi singkat
+                await sendMessage(chatId, `⛔️ Order <b>${orderId}</b> telah DITOLAK.`);
+            }
+            // ============================================
+
             else if (data.startsWith('REVISI_')) {
                 const orderId = data.replace('REVISI_', '');
-                // Ambil data terbaru dari DB untuk ditampilkan di menu edit
                 const snap = await db.collection('orders').doc(orderId).get();
-                if (snap.exists) {
-                    await showManualInputMenu(chatId, orderId, snap.data().items);
-                }
+                if (snap.exists) await showManualInputMenu(chatId, orderId, snap.data().items);
             }
 
             else if (data.startsWith('FILL_')) {
                 const parts = data.split('_');
                 const orderId = parts[1];
                 const itemIdx = parts[2];
-                const prompt = `✍️ <b>INPUT/UPDATE DATA</b>\n\nSilakan Reply pesan ini dengan data baru.\nData lama akan tertimpa.\n\nRefID: ${orderId}\nIdx: ${itemIdx}`;
+                const prompt = `✍️ <b>INPUT/UPDATE DATA</b>\n\nSilakan Reply pesan ini dengan data baru.\nRefID: ${orderId}\nIdx: ${itemIdx}`;
                 await sendMessage(chatId, prompt, { reply_markup: { force_reply: true } });
             }
             
             else if (data.startsWith('REPLY_COMPLAINT_')) {
                 const orderId = data.replace('REPLY_COMPLAINT_', ''); 
-                const prompt = `💬 <b>BALAS KOMPLAIN</b>\n\nSilakan tulis balasan Anda untuk user.\n\nRefID: ${orderId}\nMode: COMPLAINT_MODE`;
+                const prompt = `💬 <b>BALAS KOMPLAIN</b>\n\nSilakan tulis balasan Anda.\nRefID: ${orderId}\nMode: COMPLAINT_MODE`;
                 await sendMessage(chatId, prompt, { reply_markup: { force_reply: true } });
             }
             
             else if (data.startsWith('DONE_')) {
                 const orderId = data.replace('DONE_', '');
                 await db.collection('orders').doc(orderId).update({ status: 'success' });
-                await sendSuccessNotification(chatId, orderId, "UPDATE DONE");
+                await sendSuccessNotification(chatId, orderId, "FORCED");
             }
 
             return res.status(200).send('ok');
         }
 
-        // ==========================================
-        // B. HANDLE REPLY PESAN & COMMAND (TEXT)
-        // ==========================================
+        // ... (BAGIAN HANDLE TEXT DI BAWAH TETAP SAMA JANGAN DIUBAH) ...
         if (update.message) {
             const text = update.message.text || "";
             const chatId = update.message.chat.id;
@@ -83,8 +102,6 @@ module.exports = async function(req, res) {
                 
                 if (idMatch) {
                     const orderId = idMatch[1];
-
-                    // SKENARIO 1: INPUT/UPDATE DATA BARANG
                     const idxMatch = replyOrigin.match(/Idx:\s*(\d+)/);
                     if (idxMatch) {
                         const itemIdx = parseInt(idxMatch[1]);
@@ -96,7 +113,7 @@ module.exports = async function(req, res) {
                             if(!doc.exists) return;
                             const items = doc.data().items;
                             if(items[itemIdx]) {
-                                items[itemIdx].data = dataArray; // INI AKAN MENIMPA DATA LAMA (UPDATE)
+                                items[itemIdx].data = dataArray;
                                 items[itemIdx].sn = dataArray;
                                 items[itemIdx].note = `Updated: ${new Date().toLocaleTimeString()}`;
                             }
@@ -104,8 +121,7 @@ module.exports = async function(req, res) {
                             t.update(ref, { items: items, status: allFilled ? 'success' : 'processing' });
                             return allFilled;
                         }).then(async (allFilled) => {
-                             await sendMessage(chatId, `✅ Data berhasil diperbarui.`);
-                             // Tampilkan notifikasi sukses lagi (opsional, biar admin bisa cek link WA lagi)
+                             await sendMessage(chatId, `✅ Data tersimpan.`);
                              if(allFilled) await sendSuccessNotification(chatId, orderId, "DATA UPDATED"); 
                              else {
                                  const snap = await db.collection('orders').doc(orderId).get();
@@ -113,8 +129,6 @@ module.exports = async function(req, res) {
                              }
                         });
                     }
-                    
-                    // SKENARIO 2: BALAS KOMPLAIN
                     else if (replyOrigin.includes('Mode: COMPLAINT_MODE')) {
                         await db.collection('orders').doc(orderId).update({
                             complaintReply: text, 
