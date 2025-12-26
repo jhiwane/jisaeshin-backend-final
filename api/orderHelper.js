@@ -23,7 +23,6 @@ async function processOrderStock(orderId) {
             if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) continue;
 
             const item = items[i];
-            // Pastikan ID Produk Induk benar
             const pid = item.isVariant ? item.originalId : item.id;
             
             const pRef = db.collection('products').doc(pid);
@@ -35,9 +34,11 @@ async function processOrderStock(orderId) {
             }
 
             const pData = pDoc.data();
+            const isParentManual = pData.isManual || pData.processType === 'MANUAL';
 
-            // Cek jika produk memang settingan Manual
-            if (pData.isManual || pData.processType === 'MANUAL') {
+            // --- PERBAIKAN LOGIKA 1: IZINKAN VARIAN MESKIPUN INDUK MANUAL ---
+            // Jika ini BUKAN varian (Produk Utama) DAN settingannya manual, baru kita skip.
+            if (!item.isVariant && isParentManual) {
                 logs.push(`⚠️ <b>${item.name}</b>: Produk tipe Manual (Tunggu Admin).`);
                 needManual = true; continue;
             }
@@ -45,9 +46,9 @@ async function processOrderStock(orderId) {
             let stokDiambil = [];
             let updateTarget = {};
 
-            // --- PERBAIKAN LOGIKA VARIASI (POIN 4) ---
+            // --- CEK STOK ---
             if (item.isVariant) {
-                // Cari index variasi berdasarkan nama (Case Insensitive & Trimmed)
+                // Cari index variasi (Case Insensitive & Trimmed biar akurat)
                 const vIdx = pData.variations ? pData.variations.findIndex(v => 
                     v.name.trim().toLowerCase() === item.variantName.trim().toLowerCase()
                 ) : -1;
@@ -56,16 +57,15 @@ async function processOrderStock(orderId) {
                     const stokVarian = pData.variations[vIdx].items || [];
                     if (stokVarian.length >= item.qty) {
                         stokDiambil = stokVarian.slice(0, item.qty);
-                        // Update sisa stok di array variasi
-                        pData.variations[vIdx].items = stokVarian.slice(item.qty);
+                        pData.variations[vIdx].items = stokVarian.slice(item.qty); // Sisa stok
                         updateTarget = { variations: pData.variations };
                         logs.push(`✅ <b>${item.name}</b>: Stok Varian OK.`);
                     } else {
-                        logs.push(`❌ <b>${item.name}</b>: Stok Varian KURANG (${stokVarian.length}/${item.qty}).`);
+                        logs.push(`❌ <b>${item.name}</b>: Stok Varian KURANG (Sisa: ${stokVarian.length}).`);
                         needManual = true;
                     }
                 } else {
-                    logs.push(`❌ <b>${item.name}</b>: Varian '${item.variantName}' tidak ketemu di DB.`);
+                    logs.push(`❌ <b>${item.name}</b>: Nama Varian '${item.variantName}' tidak cocok di DB.`);
                     needManual = true;
                 }
             } else {
@@ -103,7 +103,6 @@ async function processOrderStock(orderId) {
 
 /**
  * KIRIM NOTIFIKASI SUKSES (Format Konsisten)
- * Dipakai oleh: Telegram ACC, Midtrans, Notify
  */
 async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
     const snap = await db.collection('orders').doc(orderId).get();
@@ -138,16 +137,17 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
  * TAMPILKAN MENU INPUT MANUAL (Jika Stok Kosong)
  */
 async function showManualInputMenu(chatId, orderId, items) {
-    let msg = `⚠️ <b>BUTUH INPUT MANUAL</b>\nOrder ID: ${orderId}\nAda stok kosong/manual. Silakan isi:\n`;
+    let msg = `⚠️ <b>BUTUH INPUT MANUAL</b>\nOrder ID: <code>${orderId}</code>\n\nIsi data untuk item berikut:\n`;
     const kb = [];
     
     items.forEach((item, i) => {
         const ready = (item.data && Array.isArray(item.data) && item.data.length > 0);
-        msg += `\n${i+1}. ${item.name} [${ready ? '✅' : '❌'}]`;
+        const icon = ready ? '✅' : '❌';
+        msg += `\n${i+1}. ${item.name} [${icon}]`;
         
         if (!ready) {
-            // Kita kirim index saja agar callback data pendek
-            kb.push([{ text: `✏️ ISI: ${item.name}`, callback_data: `FILL_${orderId}_${i}` }]);
+            // Callback data MAX 64 bytes. Kita kirim index saja biar aman.
+            kb.push([{ text: `✏️ ISI: ${item.name.slice(0, 15)}...`, callback_data: `FILL_${orderId}_${i}` }]);
         }
     });
 
