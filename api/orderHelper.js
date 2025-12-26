@@ -3,7 +3,7 @@ const { sendMessage } = require('./botConfig');
 
 /**
  * PROSES CEK STOK & UPDATE STATUS (Core Logic)
- * Dipakai oleh: Midtrans, Telegram ACC, dan Notify Auto
+ * (Bagian ini TIDAK BERUBAH dari versi sebelumnya)
  */
 async function processOrderStock(orderId) {
     const orderRef = db.collection('orders').doc(orderId);
@@ -17,27 +17,22 @@ async function processOrderStock(orderId) {
         let logs = [];
         let needManual = false;
 
-        // Loop setiap item
         for (let i = 0; i < items.length; i++) {
-            // Skip jika data sudah terisi (menghindari double processing)
             if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) continue;
 
             const item = items[i];
             const pid = item.isVariant ? item.originalId : item.id;
-            
             const pRef = db.collection('products').doc(pid);
             const pDoc = await t.get(pRef);
 
             if (!pDoc.exists) {
-                logs.push(`⚠️ <b>${item.name}</b>: Produk induk dihapus/hilang di DB.`);
+                logs.push(`⚠️ <b>${item.name}</b>: Produk induk dihapus/hilang.`);
                 needManual = true; continue;
             }
 
             const pData = pDoc.data();
             const isParentManual = pData.isManual || pData.processType === 'MANUAL';
 
-            // --- PERBAIKAN LOGIKA 1: IZINKAN VARIAN MESKIPUN INDUK MANUAL ---
-            // Jika ini BUKAN varian (Produk Utama) DAN settingannya manual, baru kita skip.
             if (!item.isVariant && isParentManual) {
                 logs.push(`⚠️ <b>${item.name}</b>: Produk tipe Manual (Tunggu Admin).`);
                 needManual = true; continue;
@@ -46,9 +41,7 @@ async function processOrderStock(orderId) {
             let stokDiambil = [];
             let updateTarget = {};
 
-            // --- CEK STOK ---
             if (item.isVariant) {
-                // Cari index variasi (Case Insensitive & Trimmed biar akurat)
                 const vIdx = pData.variations ? pData.variations.findIndex(v => 
                     v.name.trim().toLowerCase() === item.variantName.trim().toLowerCase()
                 ) : -1;
@@ -57,19 +50,18 @@ async function processOrderStock(orderId) {
                     const stokVarian = pData.variations[vIdx].items || [];
                     if (stokVarian.length >= item.qty) {
                         stokDiambil = stokVarian.slice(0, item.qty);
-                        pData.variations[vIdx].items = stokVarian.slice(item.qty); // Sisa stok
+                        pData.variations[vIdx].items = stokVarian.slice(item.qty);
                         updateTarget = { variations: pData.variations };
                         logs.push(`✅ <b>${item.name}</b>: Stok Varian OK.`);
                     } else {
-                        logs.push(`❌ <b>${item.name}</b>: Stok Varian KURANG (Sisa: ${stokVarian.length}).`);
+                        logs.push(`❌ <b>${item.name}</b>: Stok Varian KURANG.`);
                         needManual = true;
                     }
                 } else {
-                    logs.push(`❌ <b>${item.name}</b>: Nama Varian '${item.variantName}' tidak cocok di DB.`);
+                    logs.push(`❌ <b>${item.name}</b>: Varian tidak cocok.`);
                     needManual = true;
                 }
             } else {
-                // Produk Utama (Non-Varian)
                 const stokUtama = pData.items || [];
                 if (stokUtama.length >= item.qty) {
                     stokDiambil = stokUtama.slice(0, item.qty);
@@ -81,19 +73,15 @@ async function processOrderStock(orderId) {
                 }
             }
 
-            // Update ke Item & Database jika stok ketemu
             if (stokDiambil.length > 0) {
                 items[i].data = stokDiambil; 
-                items[i].sn = stokDiambil;   // Backup
-                items[i].desc = stokDiambil; // Backup
-                
-                // Tambah counter terjual
+                items[i].sn = stokDiambil;
+                items[i].desc = stokDiambil;
                 updateTarget.realSold = (pData.realSold || 0) + item.qty;
                 t.update(pRef, updateTarget);
             }
         }
 
-        // Status Final
         const finalStatus = needManual ? 'processing' : 'success';
         t.update(orderRef, { items: items, status: finalStatus });
 
@@ -102,21 +90,31 @@ async function processOrderStock(orderId) {
 }
 
 /**
- * KIRIM NOTIFIKASI SUKSES (Format Konsisten)
+ * KIRIM NOTIFIKASI SUKSES (Update Fix WA & Tombol Revisi)
  */
 async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
     const snap = await db.collection('orders').doc(orderId).get();
     const data = snap.data();
     
-    // Logika Cari Nomor HP
-    let hp = data.phoneNumber || "";
-    if ((!hp || hp.length < 5) && data.items[0]?.note) {
-        hp = data.items[0].note.replace(/\D/g, '');
-    }
-    hp = hp.replace(/\D/g, '');
-    if (hp.startsWith('0')) hp = '62' + hp.slice(1);
+    // --- PERBAIKAN LOGIKA NOMOR WA ---
+    // 1. Ambil dari phoneNumber user dulu (bersihkan karakter aneh)
+    let hp = data.phoneNumber ? data.phoneNumber.replace(/\D/g, '') : "";
 
-    // Format Pesan WA
+    // 2. Kalau kosong atau kependekan (di bawah 10 digit), baru cek Note
+    if (hp.length < 10 && data.items[0]?.note) {
+        const numbersInNote = data.items[0].note.replace(/\D/g, '');
+        // HANYA AMBIL jika panjangnya masuk akal (10-15 digit)
+        // Ini mencegah angka "15442" dianggap nomor HP
+        if (numbersInNote.length >= 10 && numbersInNote.length <= 15) {
+            hp = numbersInNote;
+        }
+    }
+
+    // 3. Format ke 62 (Indonesia)
+    if (hp.startsWith('0')) hp = '62' + hp.slice(1);
+    if (hp.startsWith('8')) hp = '62' + hp; // Jaga-jaga user ngetik 812...
+
+    // 4. Buat Link (Jika HP kosong, link WA akan membuka daftar kontak)
     let msg = `Halo, Pesanan *${orderId}* Sukses!\n\n`;
     data.items.forEach(i => {
         msg += `📦 ${i.name}\n`;
@@ -127,31 +125,40 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
 
     const url = hp ? `https://wa.me/${hp}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
     
-    // Kirim Ke Telegram Admin
-    await sendMessage(chatId, `✅ <b>ORDER SELESAI (${type})</b>\nID: ${orderId}\nStatus: Success (Dikirim ke Web)\n\n👇 <b>Kirim ke User:</b>`, { 
-        reply_markup: { inline_keyboard: [[{ text: "📲 Chat WA User", url: url }]] } 
+    // --- TOMBOL NOTIFIKASI ---
+    const keyboard = [
+        [{ text: "📲 Chat WA User", url: url }],
+        // FITUR BARU: TOMBOL REVISI (UPDATE KONTEN)
+        [{ text: "🛠 REVISI / EDIT DATA", callback_data: `REVISI_${orderId}` }]
+    ];
+
+    await sendMessage(chatId, `✅ <b>ORDER SELESAI (${type})</b>\nID: ${orderId}\nStatus: Success (Dikirim ke Web)\n\n👇 <b>Opsi Lanjutan:</b>`, { 
+        reply_markup: { inline_keyboard: keyboard } 
     });
 }
 
 /**
- * TAMPILKAN MENU INPUT MANUAL (Jika Stok Kosong)
+ * TAMPILKAN MENU INPUT/EDIT (Update: Bisa untuk Revisi)
  */
 async function showManualInputMenu(chatId, orderId, items) {
-    let msg = `⚠️ <b>BUTUH INPUT MANUAL</b>\nOrder ID: <code>${orderId}</code>\n\nIsi data untuk item berikut:\n`;
+    let msg = `📋 <b>INPUT / EDIT DATA PRODUK</b>\nOrder ID: <code>${orderId}</code>\n\nPilih item yang ingin diisi/diubah:\n`;
     const kb = [];
     
     items.forEach((item, i) => {
         const ready = (item.data && Array.isArray(item.data) && item.data.length > 0);
-        const icon = ready ? '✅' : '❌';
-        msg += `\n${i+1}. ${item.name} [${icon}]`;
         
-        if (!ready) {
-            // Callback data MAX 64 bytes. Kita kirim index saja biar aman.
-            kb.push([{ text: `✏️ ISI: ${item.name.slice(0, 15)}...`, callback_data: `FILL_${orderId}_${i}` }]);
-        }
+        // Tampilan Status di Text
+        msg += `\n${i+1}. ${item.name} [${ready ? '✅ TERISI' : '❌ KOSONG'}]`;
+        
+        // PERBAIKAN: Tombol selalu muncul.
+        // Jika kosong -> "✏️ ISI"
+        // Jika isi -> "📝 UBAH" (Fitur Update Konten)
+        const btnText = ready ? `📝 UBAH DATA: ${item.name.slice(0, 10)}...` : `✏️ ISI DATA: ${item.name.slice(0, 10)}...`;
+        
+        kb.push([{ text: btnText, callback_data: `FILL_${orderId}_${i}` }]);
     });
 
-    kb.push([{ text: "🚀 FORCE DONE (PAKSA SELESAI)", callback_data: `DONE_${orderId}` }]);
+    kb.push([{ text: "🚀 SELESAI (KIRIM NOTIF)", callback_data: `DONE_${orderId}` }]);
     
     await sendMessage(chatId, msg, { reply_markup: { inline_keyboard: kb } });
 }
