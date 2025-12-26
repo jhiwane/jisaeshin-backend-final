@@ -5,32 +5,31 @@ module.exports = async function(req, res) {
     const update = req.body;
 
     try {
-        // ============================================================
-        // 1. HANDLE TOMBOL (CALLBACK QUERY)
-        // ============================================================
         if (update.callback_query) {
             const query = update.callback_query;
             const data = query.data;
             const chatId = query.message.chat.id;
 
-            // --- TOMBOL ACC (PROSES OTOMATIS) ---
+            // ============================================================
+            // 1. TOMBOL ACC (PROSES OTOMATIS)
+            // ============================================================
             if (data.startsWith('ACC_')) {
                 const orderId = data.split('_')[1];
-                await sendMessage(chatId, `⚙️ Memproses Order: <b>${orderId}</b>...`);
+                await sendMessage(chatId, `⚙️ Memproses ${orderId}...`);
 
                 const orderRef = db.collection('orders').doc(orderId);
                 
                 await db.runTransaction(async (t) => {
                     const orderDoc = await t.get(orderRef);
-                    if (!orderDoc.exists) throw new Error("Order tidak ditemukan");
+                    if (!orderDoc.exists) throw "Order tidak ditemukan";
                     
                     const orderData = orderDoc.data();
-                    let items = orderData.items;
+                    let items = orderData.items; // Ambil array items
                     let logs = [];
                     let needManual = false;
 
                     for (let i = 0; i < items.length; i++) {
-                        // Skip jika sudah ada isinya
+                        // Skip jika data sudah terisi
                         if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) continue;
 
                         const item = items[i];
@@ -39,7 +38,7 @@ module.exports = async function(req, res) {
                         const pDoc = await t.get(pRef);
 
                         if (!pDoc.exists) {
-                            logs.push(`⚠️ ${item.name}: Produk induk hilang.`);
+                            logs.push(`⚠️ ${item.name}: Produk induk hilang di DB.`);
                             needManual = true; continue;
                         }
 
@@ -47,8 +46,9 @@ module.exports = async function(req, res) {
                         let stokDiambil = [];
                         let updateTarget = {};
 
-                        // LOGIKA CARI STOK (Variant vs Utama)
+                        // --- LOGIKA CARI STOK ---
                         if (item.isVariant) {
+                            // Cari Varian
                             const vIdx = pData.variations ? pData.variations.findIndex(v => v.name === item.variantName) : -1;
                             if (vIdx !== -1) {
                                 const stokVarian = pData.variations[vIdx].items || [];
@@ -58,71 +58,79 @@ module.exports = async function(req, res) {
                                     updateTarget = { variations: pData.variations };
                                     logs.push(`✅ ${item.name}: Stok Varian OK.`);
                                 } else {
-                                    logs.push(`❌ ${item.name}: Stok Varian HABIS.`);
+                                    logs.push(`❌ ${item.name}: Stok Varian KURANG.`);
                                     needManual = true;
                                 }
                             } else {
-                                logs.push(`⚠️ ${item.name}: Varian tidak ditemukan.`);
+                                logs.push(`⚠️ ${item.name}: Varian tidak ketemu.`);
                                 needManual = true;
                             }
                         } else {
+                            // Cari Utama
                             const stokUtama = pData.items || [];
                             if (stokUtama.length >= item.qty) {
                                 stokDiambil = stokUtama.slice(0, item.qty);
                                 updateTarget = { items: stokUtama.slice(item.qty) };
                                 logs.push(`✅ ${item.name}: Stok Utama OK.`);
                             } else {
-                                logs.push(`❌ ${item.name}: Stok Utama HABIS.`);
+                                logs.push(`❌ ${item.name}: Stok Utama KOSONG.`);
                                 needManual = true;
                             }
                         }
 
-                        // JIKA STOK DITEMUKAN: SIMPAN SEBAGAI ARRAY
+                        // --- UPDATE JIKA STOK ADA ---
                         if (stokDiambil.length > 0) {
+                            // [FIX KRUSIAL] Paksa jadi Array agar Web tidak Zonk
+                            // App.jsx butuh Array untuk .map()
                             items[i].data = stokDiambil; 
+                            
+                            // Isi field lain jaga-jaga
                             items[i].sn = stokDiambil;
                             items[i].desc = stokDiambil;
+
+                            // Update DB Produk
                             updateTarget.realSold = (pData.realSold || 0) + item.qty;
                             t.update(pRef, updateTarget);
                         }
                     }
 
-                    const statusFinal = needManual ? 'processing' : 'success';
+                    // Simpan ke Order
+                    const statusFinal = needManual ? 'processing' : 'success'; // Success = muncul di web
                     t.update(orderRef, { items: items, status: statusFinal });
 
                     return { logs, needManual };
                 }).then(async (res) => {
                     await sendMessage(chatId, `📄 <b>Laporan:</b>\n${res.logs.join('\n')}`);
                     if (res.needManual) await showMenu(chatId, orderId);
-                    else await sendWALink(chatId, orderId);
+                    else await sendWALink(chatId, orderId); // Kirim Link WA
                 }).catch(async (e) => {
                     await sendMessage(chatId, `❌ Error: ${e.message}`);
                 });
             }
 
-            // --- TOMBOL FILL (INPUT MANUAL) ---
+            // ============================================================
+            // 2. TOMBOL FILL (ISI MANUAL)
+            // ============================================================
             else if (data.startsWith('FILL_')) {
                 const parts = data.split('_');
-                const orderId = parts[1];
-                const itemIdx = parts[2];
-                const secret = `DATA|${orderId}|${itemIdx}`;
+                const secret = `DATA|${parts[1]}|${parts[2]}`;
                 
-                await sendMessage(chatId, `✍️ <b>INPUT DATA MANUAL</b>\nSilakan balas (reply) pesan ini dengan data produk.\n\nJika lebih dari 1, pisahkan dengan baris baru (Enter).`, { reply_markup: { force_reply: true } });
+                await sendMessage(chatId, `✍️ Reply pesan ini dengan data (Akun/Kode):`, { reply_markup: { force_reply: true } });
                 await sendMessage(chatId, `<span class="tg-spoiler">${secret}</span>`, { parse_mode: 'HTML' });
             }
 
-            // --- TOMBOL DONE & SELESAI ---
+            // ============================================================
+            // 3. DONE & KOMPLAIN
+            // ============================================================
             else if (data.startsWith('DONE_')) {
                 const orderId = data.split('_')[1];
                 await db.collection('orders').doc(orderId).update({ status: 'success' });
                 await sendWALink(chatId, orderId);
             }
-
-            // --- TOMBOL BALAS KOMPLAIN ---
             else if (data.startsWith('REPLY_COMPLAINT_')) {
                 const orderId = data.split('_')[1];
                 const secret = `COMPLAINT|${orderId}`;
-                await sendMessage(chatId, `🗣 <b>BALAS KOMPLAIN</b>\nKetik balasan Anda untuk pembeli di bawah ini:`, { reply_markup: { force_reply: true } });
+                await sendMessage(chatId, `✍️ Balas komplain:`, { reply_markup: { force_reply: true } });
                 await sendMessage(chatId, `<span class="tg-spoiler">${secret}</span>`, { parse_mode: 'HTML' });
             }
 
@@ -130,22 +138,22 @@ module.exports = async function(req, res) {
         }
 
         // ============================================================
-        // 2. HANDLE REPLY PESAN (INPUT DATA & BALAS KOMPLAIN)
+        // 4. HANDLE REPLY PESAN (TEXT)
         // ============================================================
         if (update.message && update.message.reply_to_message) {
             const text = update.message.text;
-            const replyText = update.message.reply_to_message.text || "";
+            const reply = update.message.reply_to_message.text || "";
             const chatId = update.message.chat.id;
 
-            let matchData = replyText.match(/DATA\|([A-Za-z0-9-]+)\|(\d+)/);
-            let matchComp = replyText.match(/COMPLAINT\|([A-Za-z0-9-]+)/);
+            let matchData = reply.match(/DATA\|([A-Za-z0-9-]+)\|(\d+)/);
+            let matchComp = reply.match(/COMPLAINT\|([A-Za-z0-9-]+)/);
 
-            // A. Proses Simpan Data Manual
             if (matchData) {
                 const orderId = matchData[1];
                 const idx = parseInt(matchData[2]);
                 
-                // Konversi teks input jadi Array (Split Enter)
+                // [FIX KRUSIAL] Ubah Text jadi Array (Split Enter)
+                // App.jsx WAJIB ARRAY
                 const dataArray = text.split('\n').filter(x => x.trim());
 
                 const ref = db.collection('orders').doc(orderId);
@@ -153,84 +161,80 @@ module.exports = async function(req, res) {
                 if (snap.exists) {
                     let items = snap.data().items;
                     if (items[idx]) {
-                        items[idx].data = dataArray; // Simpan sebagai array agar web tidak zonk
-                        items[idx].sn = dataArray;
-                        items[idx].desc = dataArray;
-                        items[idx].note = dataArray[0] || 'Manual Input';
+                        items[idx].data = dataArray; // Array
+                        items[idx].sn = dataArray;   // Backup
+                        items[idx].note = dataArray[0] || ''; // Preview note
                         
                         await ref.update({ items: items });
-                        await sendMessage(chatId, `✅ Berhasil menyimpan data untuk: <b>${items[idx].name}</b>`);
+                        await sendMessage(chatId, "✅ Data tersimpan (Array Mode).");
                         await showMenu(chatId, orderId);
                     }
                 }
             }
-            // B. Proses Balas Komplain
             else if (matchComp) {
-                const orderId = matchComp[1];
-                await db.collection('orders').doc(orderId).update({ 
-                    complaintReply: text, 
-                    hasNewReply: true 
-                });
-                await sendMessage(chatId, `✅ Balasan telah terkirim ke Web User.`);
+                await db.collection('orders').doc(matchComp[1]).update({ complaintReply: text, hasNewReply: true });
+                await sendMessage(chatId, "✅ Balasan terkirim.");
             }
         }
     } catch (e) {
-        console.error("Bot Error:", e);
+        if(req.body.message) sendMessage(req.body.message.chat.id, `Error: ${e.message}`);
     }
     return res.status(200).send('ok');
 };
 
-// ============================================================
-// FUNGSI HELPER
-// ============================================================
+// --- FUNGSI BANTUAN ---
 
 async function showMenu(chatId, orderId) {
     const snap = await db.collection('orders').doc(orderId).get();
     if(!snap.exists) return;
     const items = snap.data().items;
     
-    let msg = `📋 <b>MENU PENGISIAN DATA: ${orderId}</b>\n`;
+    let msg = `📋 <b>ORDER ${orderId}</b>\n`;
     const kb = [];
     
     items.forEach((item, i) => {
+        // Cek Array length
         const ready = (item.data && Array.isArray(item.data) && item.data.length > 0);
         msg += `\n${i+1}. ${item.name} [${ready ? '✅' : '❌'}]`;
-        kb.push([{ text: `${ready ? '✅' : '✏️'} Isi/Edit: ${item.name}`, callback_data: `FILL_${orderId}_${i}` }]);
+        kb.push([{ text: `${ready?'✅':'✏️'} Edit: ${item.name}`, callback_data: `FILL_${orderId}_${i}` }]);
     });
-    
     kb.push([{ text: "🚀 SELESAI & KIRIM WA", callback_data: `DONE_${orderId}` }]);
     await sendMessage(chatId, msg, { reply_markup: { inline_keyboard: kb } });
 }
 
+// [FIX WA LINK SALAH SASARAN]
 async function sendWALink(chatId, orderId) {
     const snap = await db.collection('orders').doc(orderId).get();
     const data = snap.data();
     
-    // Pencarian Nomor WhatsApp
+    // LOGIKA PENCARIAN NOMOR HP (AGRESIF)
     let hp = data.phoneNumber || "";
+    
+    // 1. Jika kosong, cari di note item pertama (biasanya user tulis nomor disitu)
     if ((!hp || hp.length < 5) && data.items[0]?.note) {
-        const possible = data.items[0].note.replace(/\D/g, '');
-        if (possible.length > 9) hp = possible;
+        // Ambil hanya angka dari note
+        const possibleNumber = data.items[0].note.replace(/\D/g, '');
+        if (possibleNumber.length > 9) hp = possibleNumber;
     }
 
-    // Format Nomor
+    // 2. Format ke 62
     hp = hp.replace(/\D/g, '');
     if (hp.startsWith('0')) hp = '62' + hp.slice(1);
     
-    // Susun Pesan WA
-    let waMsg = `Halo, Pesanan *${orderId}* sukses diproses!\n\n`;
+    // 3. Susun Pesan
+    let msg = `Halo, Pesanan *${orderId}* Sukses!\n\n`;
     data.items.forEach(i => {
-        waMsg += `📦 *${i.name}*\n`;
-        if(i.data && Array.isArray(i.data)) waMsg += `\`${i.data.join('\n')}\`\n\n`;
-        else waMsg += `(Data akan segera dikirim)\n\n`;
+        msg += `📦 ${i.name}\n`;
+        // Gabungkan array jadi string utk WA
+        if(i.data && Array.isArray(i.data)) msg += `${i.data.join('\n')}\n\n`;
+        else msg += `Data: -\n\n`;
     });
-    waMsg += `Terima kasih telah berbelanja!`;
+    msg += `Trims!`;
 
-    const url = hp ? `https://wa.me/${hp}?text=${encodeURIComponent(waMsg)}` : `https://wa.me/?text=${encodeURIComponent(waMsg)}`;
+    // 4. Link
+    const url = hp ? `https://wa.me/${hp}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
     
-    const textFinal = `✅ <b>ORDER SELESAI!</b>\nData sudah sinkron ke Web.\n\n📱 Nomor: ${hp || 'Tidak Ditemukan'}\n\nKlik tombol di bawah untuk chat pembeli:`;
-    
-    await sendMessage(chatId, textFinal, { 
-        reply_markup: { inline_keyboard: [[{ text: "📲 Chat WhatsApp", url: url }]] } 
+    await sendMessage(chatId, `✅ <b>SELESAI!</b>\nData PASTI muncul di web (Array Fix).\n\nNomor User: ${hp || 'TIDAK KETEMU'}\nKlik WA:`, { 
+        reply_markup: { inline_keyboard: [[{ text: "📲 Chat WA", url: url }]] } 
     });
 }
