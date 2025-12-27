@@ -1,19 +1,31 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
-// Import Otak Utama
 const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
 
-const ADMIN_CHAT_ID = '1383656187'; // ID Admin Anda
+const ADMIN_CHAT_ID = '1383656187'; // ID Admin Telegram Anda
 
 module.exports = async function(req, res) {
     const { orderId, type, buyerContact, message, total, items } = req.body;
 
     try {
         // ==========================================
-        // 1. AUTO ORDER (MIDTRANS / WEB)
+        // 1. AUTO ORDER (MIDTRANS) & SALDO MEMBER
         // ==========================================
-        if (type === 'auto') {
-            // Susun Info Detail Produk
+        if (type === 'auto' || type === 'saldo') {
+            
+            // A. Tentukan Judul Header Berdasarkan Tipe
+            let headerMsg = "";
+            let notifLabel = "";
+
+            if (type === 'saldo') {
+                headerMsg = `💎 <b>PEMBAYARAN SALDO (MEMBER)</b>`;
+                notifLabel = "SALDO";
+            } else {
+                headerMsg = `⚡️ <b>PESANAN OTOMATIS (MIDTRANS)</b>`;
+                notifLabel = "OTOMATIS";
+            }
+
+            // B. Susun Info Detail Produk
             let itemsDetail = "";
             if (items && Array.isArray(items)) {
                 items.forEach(i => {
@@ -22,23 +34,25 @@ module.exports = async function(req, res) {
                 });
             }
 
-            const msg = `⚡️ <b>PESANAN OTOMATIS (WEB)</b>\n` +
+            const msg = `${headerMsg}\n` +
                         `🆔 ID: <code>${orderId}</code>\n` +
-                        `💰 Total: Rp ${(parseInt(total)||0).toLocaleString()}\n\n` +
+                        `💰 Total: Rp ${(parseInt(total)||0).toLocaleString()}\n` +
+                        `👤 User: ${buyerContact || 'Guest'}\n\n` +
                         `${itemsDetail}\n` +
-                        `⚙️ <i>Sistem sedang mengecek stok database...</i>`;
+                        `⚙️ <i>Sistem sedang memproses stok...</i>`;
 
             await sendMessage(ADMIN_CHAT_ID, msg);
             
-            // --- EKSEKUSI STOK LANGSUNG ---
+            // C. Eksekusi Stok (Sama untuk Saldo & Midtrans)
+            // Karena di Frontend Saldo sudah dipotong via Transaction, di sini kita tinggal potong stok & kirim barang.
             const result = await processOrderStock(orderId);
             
             if (result.success) {
                 // Jika stok ada, kirim notif sukses + link WA
-                await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "OTOMATIS");
+                await sendSuccessNotification(ADMIN_CHAT_ID, orderId, notifLabel);
             } else {
                 // Jika stok kosong, langsung minta input manual
-                await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>STOK OTOMATIS GAGAL/KOSONG</b>\n${result.logs.join('\n')}`);
+                await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>STOK GAGAL/KOSONG (${notifLabel})</b>\n${result.logs.join('\n')}`);
                 await showManualInputMenu(ADMIN_CHAT_ID, orderId, result.items);
             }
         } 
