@@ -1,5 +1,6 @@
 const { db } = require('./firebaseConfig');
 const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
+const { sendMessage } = require('./botConfig'); // Import sendMessage
 
 const ADMIN_CHAT_ID = '1383656187';
 
@@ -8,19 +9,21 @@ module.exports = async function(req, res) {
 
     if (transaction_status == 'capture' || transaction_status == 'settlement') {
         try {
-            // Update status dulu biar aman
+            console.log(`[MIDTRANS] Order ${order_id} LUNAS.`);
+
+            // 1. Update status
             await db.collection('orders').doc(order_id).update({ status: 'paid' });
 
-            // Proses Stok (Pakai logika yang sama dgn Notify/Telegram)
+            // 2. Proses Stok
             const result = await processOrderStock(order_id);
 
             if (result.success) {
-                // Jangan kirim notif double jika Notify.js sudah mengirimnya
-                // Cek flag atau biarkan saja (biasanya midtrans webhook duluan daripada notify web)
-                // Kita kirim notif silent sebagai log
-                console.log(`Midtrans ${order_id} Sukses`);
+                // [FIX] KIRIM NOTIFIKASI KE TELEGRAM AGAR ADMIN TAU
+                await sendSuccessNotification(ADMIN_CHAT_ID, order_id, "MIDTRANS OTOMATIS");
+                console.log(`[MIDTRANS] Notif terkirim.`);
             } else {
-                // Jika stok habis, admin harus tau
+                // Jika stok habis
+                await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>MIDTRANS LUNAS TAPI STOK GAGAL</b>\nOrder: ${order_id}`);
                 await showManualInputMenu(ADMIN_CHAT_ID, order_id, result.items);
             }
 
@@ -28,5 +31,6 @@ module.exports = async function(req, res) {
             console.error("Midtrans Error:", e);
         }
     }
+    // Selalu return 200 ke Midtrans agar tidak dikirim ulang terus menerus
     res.status(200).send('ok');
 };
