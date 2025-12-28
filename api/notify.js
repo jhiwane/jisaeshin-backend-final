@@ -24,8 +24,10 @@ module.exports = async function(req, res) {
                 });
             }
 
+            // [PERBAIKAN] Saya tambahkan baris 'User' di sini agar Member/Tamu terlihat kontaknya
             const msg = `⚡️ <b>PESANAN OTOMATIS (MIDTRANS)</b>\n` +
                         `🆔 ID: <code>${orderId}</code>\n` +
+                        `👤 User: ${buyerContact || 'Guest'}\n` +  // <--- BARIS INI PENTING
                         `💰 Total: Rp ${(parseInt(total)||0).toLocaleString()}\n\n` +
                         `${itemsDetail}\n` +
                         `⚙️ <i>Sistem sedang mengecek stok database...</i>`;
