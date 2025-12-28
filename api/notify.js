@@ -13,12 +13,11 @@ module.exports = async function(req, res) {
         // 1. AUTO ORDER (MIDTRANS / WEB)
         // ==========================================
         if (type === 'auto') {
-            // Susun Info Detail Produk
             let itemsDetail = "";
             if (items && Array.isArray(items)) {
                 items.forEach(i => {
-                    const note = i.note ? `\n   📝 <i>Input: ${i.note}</i>` : '';
-                    itemsDetail += `📦 <b>${i.name}</b>\n   Qty: ${i.qty} x Rp${(parseInt(i.price)||0).toLocaleString()}${note}\n`;
+                    const note = i.note ? `\n    📝 <i>Input: ${i.note}</i>` : '';
+                    itemsDetail += `📦 <b>${i.name}</b>\n    Qty: ${i.qty} x Rp${(parseInt(i.price)||0).toLocaleString()}${note}\n`;
                 });
             }
 
@@ -30,21 +29,51 @@ module.exports = async function(req, res) {
 
             await sendMessage(ADMIN_CHAT_ID, msg);
             
-            // --- EKSEKUSI STOK LANGSUNG ---
             const result = await processOrderStock(orderId);
             
             if (result.success) {
-                // Jika stok ada, kirim notif sukses + link WA
                 await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "OTOMATIS");
             } else {
-                // Jika stok kosong, langsung minta input manual
                 await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>STOK OTOMATIS GAGAL/KOSONG</b>\n${result.logs.join('\n')}`);
                 await showManualInputMenu(ADMIN_CHAT_ID, orderId, result.items);
             }
         } 
         
         // ==========================================
-        // 2. KOMPLAIN DARI USER
+        // 2. PEMBAYARAN SALDO (MEMBER) 💎 [BARU]
+        // ==========================================
+        else if (type === 'saldo') {
+            let itemsDetail = "";
+            if (items && Array.isArray(items)) {
+                items.forEach(i => {
+                    const note = i.note ? `\n    📝 <i>Input: ${i.note}</i>` : '';
+                    itemsDetail += `💎 <b>${i.name}</b>\n    Qty: ${i.qty} x Rp${(parseInt(i.price)||0).toLocaleString()}${note}\n`;
+                });
+            }
+
+            const msg = `💎 <b>PESANAN VIA SALDO (MEMBER)</b>\n` +
+                        `🆔 ID: <code>${orderId}</code>\n` +
+                        `👤 User: ${buyerContact || 'Member'}\n` +
+                        `💰 Total: Rp ${(parseInt(total)||0).toLocaleString()}\n\n` +
+                        `${itemsDetail}\n` +
+                        `⚙️ <i>Memproses pemotongan stok...</i>`;
+
+            await sendMessage(ADMIN_CHAT_ID, msg);
+
+            // Eksekusi stok langsung (Sama seperti auto karena saldo sudah terpotong di frontend)
+            const result = await processOrderStock(orderId);
+
+            if (result.success) {
+                await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "SALDO/MEMBER");
+            } else {
+                // Jika stok gagal, admin harus input manual datanya
+                await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>STOK SALDO GAGAL</b>\n${result.logs.join('\n')}`);
+                await showManualInputMenu(ADMIN_CHAT_ID, orderId, result.items);
+            }
+        }
+
+        // ==========================================
+        // 3. KOMPLAIN DARI USER
         // ==========================================
         else if (type === 'complaint') {
             const text = `⚠️ <b>LAPORAN MASALAH (KOMPLAIN)</b>\n\n` +
@@ -61,7 +90,7 @@ module.exports = async function(req, res) {
         }
         
         // ==========================================
-        // 3. KONFIRMASI PEMBAYARAN MANUAL
+        // 4. KONFIRMASI PEMBAYARAN MANUAL
         // ==========================================
         else if (type === 'manual') {
             let itemsDetail = "";
