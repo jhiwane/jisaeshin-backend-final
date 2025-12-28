@@ -1,36 +1,31 @@
-const { db } = require('./firebaseConfig');
-const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
-const { sendMessage } = require('./botConfig'); // Import sendMessage
+const midtransClient = require('midtrans-client');
+// Jika ingin update database di sini, kamu perlu inisialisasi Firebase Admin SDK di backend
+// Tapi untuk sekarang, kita log saja biar simpel.
 
-const ADMIN_CHAT_ID = '1383656187';
+const apiClient = new midtransClient.Snap({
+    isProduction: process.env.MIDTRANS_IS_PRODUCTION === 'true',
+    serverKey: process.env.MIDTRANS_SERVER_KEY
+});
 
-module.exports = async function(req, res) {
-    const { order_id, transaction_status } = req.body;
+module.exports = async (req, res) => {
+    try {
+        const notificationJson = req.body;
+        
+        // Verifikasi tanda tangan Midtrans (Security)
+        const statusResponse = await apiClient.transaction.notification(notificationJson);
+        
+        const orderId = statusResponse.order_id;
+        const transactionStatus = statusResponse.transaction_status;
+        const fraudStatus = statusResponse.fraud_status;
 
-    if (transaction_status == 'capture' || transaction_status == 'settlement') {
-        try {
-            console.log(`[MIDTRANS] Order ${order_id} LUNAS.`);
+        console.log(`[WEBHOOK] Order: ${orderId} | Status: ${transactionStatus}`);
 
-            // 1. Update status
-            await db.collection('orders').doc(order_id).update({ status: 'paid' });
-
-            // 2. Proses Stok
-            const result = await processOrderStock(order_id);
-
-            if (result.success) {
-                // [FIX] KIRIM NOTIFIKASI KE TELEGRAM AGAR ADMIN TAU
-                await sendSuccessNotification(ADMIN_CHAT_ID, order_id, "MIDTRANS OTOMATIS");
-                console.log(`[MIDTRANS] Notif terkirim.`);
-            } else {
-                // Jika stok habis
-                await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>MIDTRANS LUNAS TAPI STOK GAGAL</b>\nOrder: ${order_id}`);
-                await showManualInputMenu(ADMIN_CHAT_ID, order_id, result.items);
-            }
-
-        } catch (e) {
-            console.error("Midtrans Error:", e);
-        }
+        // Di sini kamu bisa tambahkan logika update database Firebase (Admin SDK)
+        // jika ingin status berubah 'paid' meskipun user menutup browser.
+        
+        res.status(200).send('OK');
+    } catch (error) {
+        console.error("Webhook Error:", error.message);
+        res.status(200).send('OK'); // Selalu balas OK ke Midtrans biar gak di-spam
     }
-    // Selalu return 200 ke Midtrans agar tidak dikirim ulang terus menerus
-    res.status(200).send('ok');
 };
