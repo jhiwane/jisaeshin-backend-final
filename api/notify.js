@@ -1,85 +1,117 @@
-const axios = require('axios');
+// Ganti path require sesuai lokasi file botConfig.js kamu
+// Jika notify.js dan botConfig.js ada di folder yang sama (folder 'api'), gunakan './botConfig'
+// Jika botConfig.js ada di folder luar, gunakan '../botConfig'
+const { sendMessage } = require('./botConfig'); 
 
-// Fungsi Helper Kirim Telegram
-const sendTelegramMessage = async (message) => {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_CHAT_ID;
-    
-    if (!token || !chatId) return console.error("TELEGRAM CONFIG MISSING");
-
-    try {
-        await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
-            chat_id: chatId,
-            text: message,
-            parse_mode: 'Markdown'
-        });
-        console.log("Telegram Sent!");
-    } catch (error) {
-        console.error("Telegram Fail:", error.message);
-    }
-};
-
-// Handler Utama
 module.exports = async (req, res) => {
     try {
-        // Kita terima data 'items' yang sudah berisi array 'data' (konten) dari Frontend
         const { orderId, total, items, buyerContact, type } = req.body;
         
-        console.log(`[NOTIFY] Report Masuk: ${orderId} (${type})`);
+        // Ambil Chat ID dari Environment Variable (Sama seperti file lain)
+        const chatId = process.env.TELEGRAM_CHAT_ID;
 
-        // --- FORMAT PESAN TELEGRAM ---
+        console.log(`[NOTIFY] Laporan Masuk: ${orderId} (${type})`);
+
         let message = "";
-        const date = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+        let keyboard = []; // Penampung Tombol
         const fmtTotal = parseInt(total).toLocaleString('id-ID');
 
-        // KASUS 1: SUKSES (AUTO / SALDO)
+        // --- DETEKSI APAKAH PERLU INPUT MANUAL? ---
+        // (Jika beli otomatis tapi stok habis, item.data akan kosong)
+        let needsManualInput = false;
+        if (items && Array.isArray(items)) {
+            needsManualInput = items.some(i => !i.data || i.data.length === 0);
+        }
+
+        // ====================================================
+        // KASUS 1: PEMBAYARAN SUKSES (AUTO / SALDO)
+        // ====================================================
         if (type === 'auto' || type === 'saldo') {
-            message = `✅ *ORDER SELESAI (${type.toUpperCase()})*\n`;
+            const statusIcon = needsManualInput ? "⚠️" : "✅";
+            const typeLabel = type.toUpperCase();
+
+            // FORMAT HTML (PENTING! JANGAN PAKAI BINTANG *)
+            message = `<b>${statusIcon} PEMBAYARAN LUNAS (${typeLabel})</b>\n`;
+            message += `🆔 ID: <code>${orderId}</code>\n`;
+            message += `💰 Omzet: Rp ${fmtTotal}\n`;
+            message += `👤 Pembeli: ${buyerContact}\n`;
             message += `--------------------------------\n`;
-            message += `🆔 *ID:* \`${orderId}\`\n`;
-            message += `📅 *Waktu:* ${date}\n`;
-            message += `💰 *Total:* Rp ${fmtTotal}\n`;
-            message += `👤 *Pembeli:* ${buyerContact}\n`;
-            message += `--------------------------------\n`;
-            message += `📦 *DETAIL KONTEN TERKIRIM:*\n`;
 
             if (items && Array.isArray(items)) {
                 items.forEach((item, index) => {
-                    message += `\n${index + 1}. *${item.name}* (x${item.qty})\n`;
+                    message += `📦 <b>${item.name}</b> (x${item.qty})\n`;
                     
-                    // Frontend sudah mengirim 'data' di sini, kita tinggal tampilkan
+                    // JIKA ADA DATA (STOK TERKIRIM OTOMATIS)
                     if (item.data && Array.isArray(item.data) && item.data.length > 0) {
-                        message += `   ✨ *KONTEN:* \n`;
-                        item.data.forEach(d => message += `   ▫️ \`${d}\`\n`);
-                    } else if (item.isManual) {
-                        message += `   ⚠️ *PROSES MANUAL (Joki/Topup)*\n`;
-                    } else {
-                        message += `   ℹ️ _Stok Terpotong (Tanpa data teks)_\n`;
+                        message += `   ✨ <i>Terkirim Otomatis:</i>\n`;
+                        item.data.forEach(d => message += `   <code>${d}</code>\n`);
+                    } 
+                    // JIKA DATA KOSONG (STOK HABIS/MANUAL)
+                    else {
+                        message += `   ❌ <b>DATA KOSONG (Wajib Input)</b>\n`;
                     }
                 });
             }
+
+            // --- LOGIKA SETAN: JIKA KOSONG, KASIH TOMBOL INPUT ---
+            if (needsManualInput) {
+                message += `\n👇 <b>SILAKAN INPUT DATA DI BAWAH:</b>`;
+                
+                // Loop untuk bikin tombol per item yang kosong
+                items.forEach((item, i) => {
+                    const isFilled = (item.data && item.data.length > 0);
+                    if (!isFilled) {
+                        keyboard.push([{ 
+                            text: `✏️ ISI: ${item.name.substring(0, 15)}...`, 
+                            callback_data: `FILL_${orderId}_${i}` // Trigger logic di telegram-webhook.js
+                        }]);
+                    }
+                });
+                
+                // Tombol Selesai
+                keyboard.push([{ text: "🚀 SELESAI & UPDATE WEB", callback_data: `DONE_${orderId}` }]);
+            }
         } 
         
-        // KASUS 2: MANUAL TRANSFER
+        // ====================================================
+        // KASUS 2: MANUAL TRANSFER (BUTUH ACC)
+        // ====================================================
         else if (type === 'manual') {
-            message = `⚠️ *KONFIRMASI MANUAL BARU*\n`;
-            message += `🆔 *ID:* \`${orderId}\`\n`;
-            message += `💰 *Total:* Rp ${fmtTotal}\n`;
-            message += `👤 *Pembeli:* ${buyerContact}\n\n`;
-            message += `User mengaku sudah transfer. Cek mutasi dan ACC di Admin Panel!`;
+            message = `⚠️ <b>KONFIRMASI MANUAL BARU</b>\n`;
+            message += `🆔 ID: <code>${orderId}</code>\n`;
+            message += `💰 Total: Rp ${fmtTotal}\n`;
+            message += `👤 Pembeli: ${buyerContact}\n\n`;
+            message += `User mengaku sudah transfer. Cek mutasi!`;
+
+            keyboard = [
+                [{ text: "✅ ACC PESANAN", callback_data: `ACC_${orderId}` }],
+                [{ text: "⛔ TOLAK", callback_data: `REJECT_${orderId}` }]
+            ];
         }
         
+        // ====================================================
         // KASUS 3: KOMPLAIN
+        // ====================================================
         else if (type === 'complaint') {
-             message = `🆘 *KOMPLAIN USER*\n🆔 ${orderId}\n💬 "${req.body.message}"\n👤 ${buyerContact}`;
+             message = `🆘 <b>KOMPLAIN USER</b>\n`;
+             message += `🆔 <code>${orderId}</code>\n`;
+             message += `💬 "${req.body.message}"\n`;
+             message += `👤 ${buyerContact}`;
+             
+             keyboard = [[{ text: "💬 BALAS PESAN", callback_data: `REPLY_COMPLAINT_${orderId}` }]];
         }
 
-        if (message) await sendTelegramMessage(message);
+        // KIRIM KE BOT (PASTI JALAN KARENA PAKAI botConfig)
+        if (message) {
+            const options = keyboard.length > 0 ? { reply_markup: { inline_keyboard: keyboard } } : {};
+            await sendMessage(chatId, message, options);
+            console.log("Notif Telegram Terkirim via botConfig!");
+        }
 
         res.status(200).json({ status: 'OK' });
 
     } catch (error) {
-        console.error("Notify Error:", error.message);
+        console.error("Notify Error:", error);
         res.status(200).json({ status: 'Error handled' });
     }
 };
