@@ -1,7 +1,7 @@
 {
   "name": "jisaeshin-backend-final",
   "version": "1.0.0",
-  "description": "",
+  "description": "Backend Midtrans & Telegram",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -11,11 +11,14 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "axios": "^1.7.9",
     "body-parser": "^2.2.1",
     "cors": "^2.8.5",
-    "express": "^5.2.1",
+    "express": "^4.18.2",
     "firebase-admin": "^13.6.0",
-    "midtrans-client": "^1.4.3",
-    "node-fetch": "^2.7.0"
+    "midtrans-client": "^1.4.3"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
