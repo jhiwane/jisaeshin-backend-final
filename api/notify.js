@@ -1,47 +1,97 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
+// Import Otak Utama
+const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
 
-const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_ID;
+const ADMIN_CHAT_ID = '1383656187'; // ID Admin Anda
 
 module.exports = async function(req, res) {
-    const { orderId, type, buyerContact, message } = req.body;
+    const { orderId, type, buyerContact, message, total, items } = req.body;
 
     try {
-        // 1. Handle Komplain
-        if (type === 'complaint') {
-            const text = `⚠️ <b>KOMPLAIN BARU!</b>\nOrder ID: <code>${orderId}</code>\nKontak: ${buyerContact}\nPesan: ${message}\n\n👉 <i>Reply pesan ini untuk membalas ke web pembeli.</i>`;
-            await sendMessage(ADMIN_CHAT_ID, text);
-            return res.status(200).json({ status: 'ok' });
-        }
+        // ==========================================
+        // 1. AUTO ORDER (MIDTRANS / WEB)
+        // ==========================================
+        if (type === 'auto') {
+            // Susun Info Detail Produk
+            let itemsDetail = "";
+            if (items && Array.isArray(items)) {
+                items.forEach(i => {
+                    const note = i.note ? `\n   📝 <i>Input: ${i.note}</i>` : '';
+                    itemsDetail += `📦 <b>${i.name}</b>\n   Qty: ${i.qty} x Rp${(parseInt(i.price)||0).toLocaleString()}${note}\n`;
+                });
+            }
 
-        // 2. Handle Konfirmasi Manual
-        if (type === 'manual') {
-            const orderSnap = await db.collection('orders').doc(orderId).get();
-            if (!orderSnap.exists) return res.status(404).json({ error: 'Order not found' });
+            const msg = `⚡️ <b>PESANAN OTOMATIS (WEB)</b>\n` +
+                        `🆔 ID: <code>${orderId}</code>\n` +
+                        `💰 Total: Rp ${(parseInt(total)||0).toLocaleString()}\n\n` +
+                        `${itemsDetail}\n` +
+                        `⚙️ <i>Sistem sedang mengecek stok database...</i>`;
 
-            const orderData = orderSnap.data();
-            const itemsList = orderData.items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
+            await sendMessage(ADMIN_CHAT_ID, msg);
+            
+            // --- EKSEKUSI STOK LANGSUNG ---
+            const result = await processOrderStock(orderId);
+            
+            if (result.success) {
+                // Jika stok ada, kirim notif sukses + link WA
+                await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "OTOMATIS");
+            } else {
+                // Jika stok kosong, langsung minta input manual
+                await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>STOK OTOMATIS GAGAL/KOSONG</b>\n${result.logs.join('\n')}`);
+                await showManualInputMenu(ADMIN_CHAT_ID, orderId, result.items);
+            }
+        } 
+        
+        // ==========================================
+        // 2. KOMPLAIN DARI USER
+        // ==========================================
+        else if (type === 'complaint') {
+            const text = `⚠️ <b>LAPORAN MASALAH (KOMPLAIN)</b>\n\n` +
+                         `🆔 ID: <code>${orderId}</code>\n` +
+                         `👤 User: ${buyerContact || 'Guest'}\n` +
+                         `💬 Pesan: "${message}"\n\n` +
+                         `👇 <i>Klik tombol di bawah untuk membalas:</i>`;
 
-            const msg = `💸 <b>PEMBAYARAN MANUAL MASUK</b>\n` +
-                        `ID: <code>${orderId}</code>\n` +
-                        `Total: Rp ${orderData.total.toLocaleString()}\n` +
-                        `Kontak: ${buyerContact}\n\n` +
-                        `🛒 <b>Items:</b>\n${itemsList}\n\n` +
-                        `👇 <b>TINDAKAN:</b>\nCek mutasi. Jika OK, klik tombol di bawah.`;
-
-            await sendMessage(ADMIN_CHAT_ID, msg, {
+            await sendMessage(ADMIN_CHAT_ID, text, {
                 reply_markup: {
-                    inline_keyboard: [[
-                        { text: "✅ ACC PEMBAYARAN", callback_data: `ACC_${orderId}` },
-                        { text: "❌ TOLAK", callback_data: `REJECT_${orderId}` }
-                    ]]
+                    inline_keyboard: [[{ text: "🗣 BALAS KE USER", callback_data: `REPLY_COMPLAINT_${orderId}` }]]
+                }
+            });
+        }
+        
+        // ==========================================
+        // 3. KONFIRMASI PEMBAYARAN MANUAL
+        // ==========================================
+        else if (type === 'manual') {
+            let itemsDetail = "";
+            if (items && Array.isArray(items)) {
+                items.forEach(i => {
+                    const note = i.note ? ` (Input: ${i.note})` : '';
+                    itemsDetail += `- ${i.name} x${i.qty}${note}\n`;
+                });
+            }
+
+            const text = `💸 <b>PEMBAYARAN MANUAL MASUK</b>\n\n` +
+                         `🆔 ID: <code>${orderId}</code>\n` +
+                         `💰 Total: Rp ${(parseInt(total)||0).toLocaleString()}\n` +
+                         `👤 User: ${buyerContact}\n\n` +
+                         `🛒 <b>Items:</b>\n${itemsDetail}\n` +
+                         `👇 <b>TINDAKAN:</b>\nCek mutasi bank/e-wallet. Jika dana masuk, klik ACC.`;
+
+            await sendMessage(ADMIN_CHAT_ID, text, {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: "✅ TERIMA (ACC)", callback_data: `ACC_${orderId}` }],
+                        [{ text: "❌ TOLAK", callback_data: `REJECT_${orderId}` }]
+                    ]
                 }
             });
         }
 
-        return res.status(200).json({ success: true });
-    } catch (error) {
-        console.error(error);
-        return res.status(500).json({ error: error.message });
+        return res.status(200).json({ status: 'ok' });
+    } catch (e) {
+        console.error(e);
+        return res.status(500).json({ error: e.message });
     }
 };
