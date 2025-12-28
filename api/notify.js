@@ -22,68 +22,64 @@ const sendTelegramMessage = async (message) => {
 // Handler Utama
 module.exports = async (req, res) => {
     try {
+        // Kita terima data 'items' yang sudah berisi array 'data' (konten) dari Frontend
         const { orderId, total, items, buyerContact, type } = req.body;
         
-        console.log(`[NOTIFY] New Report: ${orderId} (${type})`);
+        console.log(`[NOTIFY] Report Masuk: ${orderId} (${type})`);
 
-        // --- SUSUN PESAN TELEGRAM ---
+        // --- FORMAT PESAN TELEGRAM ---
         let message = "";
         const date = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
         const fmtTotal = parseInt(total).toLocaleString('id-ID');
 
-        // KASUS 1: AUTO / SALDO (LUNAS & DIKIRIM)
+        // KASUS 1: SUKSES (AUTO / SALDO)
         if (type === 'auto' || type === 'saldo') {
-            message = `✅ *PEMBAYARAN LUNAS (${type.toUpperCase()})*\n`;
+            message = `✅ *ORDER SELESAI (${type.toUpperCase()})*\n`;
             message += `--------------------------------\n`;
             message += `🆔 *ID:* \`${orderId}\`\n`;
             message += `📅 *Waktu:* ${date}\n`;
-            message += `💰 *Omzet:* Rp ${fmtTotal}\n`;
-            message += `📞 *Pembeli:* ${buyerContact}\n`;
+            message += `💰 *Total:* Rp ${fmtTotal}\n`;
+            message += `👤 *Pembeli:* ${buyerContact}\n`;
             message += `--------------------------------\n`;
-            message += `📦 *DETAIL ITEM & KONTEN:*\n`;
+            message += `📦 *DETAIL KONTEN TERKIRIM:*\n`;
 
-            // Loop semua item untuk menampilkan KONTEN/AKUN
             if (items && Array.isArray(items)) {
                 items.forEach((item, index) => {
                     message += `\n${index + 1}. *${item.name}* (x${item.qty})\n`;
                     
-                    // Cek apakah Frontend mengirim data akun (dari stok otomatis)
-                    if (item.data && item.data.length > 0) {
-                        message += `   ✨ *DATA TERKIRIM:* \n`;
+                    // Frontend sudah mengirim 'data' di sini, kita tinggal tampilkan
+                    if (item.data && Array.isArray(item.data) && item.data.length > 0) {
+                        message += `   ✨ *KONTEN:* \n`;
                         item.data.forEach(d => message += `   ▫️ \`${d}\`\n`);
                     } else if (item.isManual) {
-                        message += `   ⚠️ *BUTUH PROSES MANUAL* (Cek DB)\n`;
+                        message += `   ⚠️ *PROSES MANUAL (Joki/Topup)*\n`;
                     } else {
-                        message += `   ℹ️ _Stok terpotong otomatis_\n`;
+                        message += `   ℹ️ _Stok Terpotong (Tanpa data teks)_\n`;
                     }
                 });
             }
         } 
         
-        // KASUS 2: MANUAL TRANSFER (BUTUH CEK)
+        // KASUS 2: MANUAL TRANSFER
         else if (type === 'manual') {
             message = `⚠️ *KONFIRMASI MANUAL BARU*\n`;
-            message += `--------------------------------\n`;
             message += `🆔 *ID:* \`${orderId}\`\n`;
             message += `💰 *Total:* Rp ${fmtTotal}\n`;
-            message += `📞 *Pembeli:* ${buyerContact}\n`;
-            message += `--------------------------------\n`;
-            message += `User mengaku sudah transfer. Segera cek mutasi bank!`;
+            message += `👤 *Pembeli:* ${buyerContact}\n\n`;
+            message += `User mengaku sudah transfer. Cek mutasi dan ACC di Admin Panel!`;
         }
         
         // KASUS 3: KOMPLAIN
         else if (type === 'complaint') {
-             message = `🆘 *USER KOMPLAIN*\n🆔 ${orderId}\n💬 "${req.body.message}"\n📞 ${buyerContact}`;
+             message = `🆘 *KOMPLAIN USER*\n🆔 ${orderId}\n💬 "${req.body.message}"\n👤 ${buyerContact}`;
         }
 
-        // Kirim Pesan
         if (message) await sendTelegramMessage(message);
 
-        // Respon ke Frontend (Biar gak timeout)
-        res.status(200).json({ status: 'OK', target: 'Telegram' });
+        res.status(200).json({ status: 'OK' });
 
     } catch (error) {
-        console.error("Notify Handler Error:", error);
+        console.error("Notify Error:", error.message);
         res.status(200).json({ status: 'Error handled' });
     }
 };
