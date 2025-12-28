@@ -1,69 +1,89 @@
-const { sendMessage } = require('./botConfig');
-const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
+const axios = require('axios');
 
-const ADMIN_CHAT_ID = '1383656187'; // ID Admin Kamu
-
-module.exports = async function(req, res) {
-    const { orderId, type, buyerContact, message, total, items } = req.body;
+// Fungsi Helper Kirim Telegram
+const sendTelegramMessage = async (message) => {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    
+    if (!token || !chatId) return console.error("TELEGRAM CONFIG MISSING");
 
     try {
-        // 1. AUTO ORDER (MIDTRANS)
-        if (type === 'auto') {
-            // ... (KODE LAMA BIARKAN SAMA) ...
-            let itemsDetail = "";
+        await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+            chat_id: chatId,
+            text: message,
+            parse_mode: 'Markdown'
+        });
+        console.log("Telegram Sent!");
+    } catch (error) {
+        console.error("Telegram Fail:", error.message);
+    }
+};
+
+// Handler Utama
+module.exports = async (req, res) => {
+    try {
+        const { orderId, total, items, buyerContact, type } = req.body;
+        
+        console.log(`[NOTIFY] New Report: ${orderId} (${type})`);
+
+        // --- SUSUN PESAN TELEGRAM ---
+        let message = "";
+        const date = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+        const fmtTotal = parseInt(total).toLocaleString('id-ID');
+
+        // KASUS 1: AUTO / SALDO (LUNAS & DIKIRIM)
+        if (type === 'auto' || type === 'saldo') {
+            message = `✅ *PEMBAYARAN LUNAS (${type.toUpperCase()})*\n`;
+            message += `--------------------------------\n`;
+            message += `🆔 *ID:* \`${orderId}\`\n`;
+            message += `📅 *Waktu:* ${date}\n`;
+            message += `💰 *Omzet:* Rp ${fmtTotal}\n`;
+            message += `📞 *Pembeli:* ${buyerContact}\n`;
+            message += `--------------------------------\n`;
+            message += `📦 *DETAIL ITEM & KONTEN:*\n`;
+
+            // Loop semua item untuk menampilkan KONTEN/AKUN
             if (items && Array.isArray(items)) {
-                items.forEach(i => {
-                    const note = i.note ? `\n   📝 <i>Input: ${i.note}</i>` : '';
-                    itemsDetail += `📦 <b>${i.name}</b>\n   Qty: ${i.qty} x Rp${(parseInt(i.price)||0).toLocaleString()}${note}\n`;
+                items.forEach((item, index) => {
+                    message += `\n${index + 1}. *${item.name}* (x${item.qty})\n`;
+                    
+                    // Cek apakah Frontend mengirim data akun (dari stok otomatis)
+                    if (item.data && item.data.length > 0) {
+                        message += `   ✨ *DATA TERKIRIM:* \n`;
+                        item.data.forEach(d => message += `   ▫️ \`${d}\`\n`);
+                    } else if (item.isManual) {
+                        message += `   ⚠️ *BUTUH PROSES MANUAL* (Cek DB)\n`;
+                    } else {
+                        message += `   ℹ️ _Stok terpotong otomatis_\n`;
+                    }
                 });
-            }
-            const msg = `⚡️ <b>PESANAN OTOMATIS (WEB)</b>\n🆔 ID: <code>${orderId}</code>\n💰 Total: Rp ${(parseInt(total)||0).toLocaleString()}\n\n${itemsDetail}\n⚙️ <i>Sistem sedang mengecek stok database...</i>`;
-            await sendMessage(ADMIN_CHAT_ID, msg);
-            
-            // Logic Auto Stock
-            const result = await processOrderStock(orderId);
-            if (result.success) {
-                await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "OTOMATIS");
-            } else {
-                await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>STOK OTOMATIS GAGAL/KOSONG</b>\n${result.logs.join('\n')}`);
-                await showManualInputMenu(ADMIN_CHAT_ID, orderId, result.items);
             }
         } 
         
-        // 2. KOMPLAIN USER (SAMA SEPERTI LAMA)
-        else if (type === 'complaint') {
-             // ... (KODE LAMA BIARKAN SAMA) ...
-             const text = `⚠️ <b>LAPORAN MASALAH</b>\n🆔 ${orderId}\n👤 ${buyerContact}\n💬 "${message}"`;
-             await sendMessage(ADMIN_CHAT_ID, text, { reply_markup: { inline_keyboard: [[{ text: "🗣 BALAS", callback_data: `REPLY_COMPLAINT_${orderId}` }]] } });
+        // KASUS 2: MANUAL TRANSFER (BUTUH CEK)
+        else if (type === 'manual') {
+            message = `⚠️ *KONFIRMASI MANUAL BARU*\n`;
+            message += `--------------------------------\n`;
+            message += `🆔 *ID:* \`${orderId}\`\n`;
+            message += `💰 *Total:* Rp ${fmtTotal}\n`;
+            message += `📞 *Pembeli:* ${buyerContact}\n`;
+            message += `--------------------------------\n`;
+            message += `User mengaku sudah transfer. Segera cek mutasi bank!`;
         }
         
-        // 3. MANUAL PAYMENT (SAMA SEPERTI LAMA)
-        else if (type === 'manual') {
-            // ... (KODE LAMA BIARKAN SAMA) ...
-            const text = `💸 <b>PEMBAYARAN MANUAL MASUK</b>\n🆔 ${orderId}\n💰 Rp ${(parseInt(total)||0).toLocaleString()}\n👤 ${buyerContact}\n👇 Cek mutasi, lalu klik ACC.`;
-            await sendMessage(ADMIN_CHAT_ID, text, {
-                reply_markup: { inline_keyboard: [[{ text: "✅ TERIMA (ACC)", callback_data: `ACC_${orderId}` }], [{ text: "❌ TOLAK", callback_data: `REJECT_${orderId}` }]] }
-            });
+        // KASUS 3: KOMPLAIN
+        else if (type === 'complaint') {
+             message = `🆘 *USER KOMPLAIN*\n🆔 ${orderId}\n💬 "${req.body.message}"\n📞 ${buyerContact}`;
         }
 
-        // === [BARU] 4. PEMBAYARAN SALDO ===
-        // Karena frontend sudah memotong saldo & stok secara aman (Atomic),
-        // Backend cukup kirim laporan sukses ke Telegram Admin.
-        else if (type === 'saldo') {
-            const msg = `💎 <b>PEMBAYARAN SALDO SUKSES</b>\n` +
-                        `🆔 ID: <code>${orderId}</code>\n` +
-                        `💰 Total: LUNAS (Potong Saldo)\n` +
-                        `✅ Stok & Saldo user sudah terpotong otomatis oleh sistem.\n` +
-                        `📅 ${new Date().toLocaleString()}`;
-            
-            await sendMessage(ADMIN_CHAT_ID, msg);
-            // Kita kirim notif "SUKSES" lagi biar link WA generate di chat admin juga (opsional)
-            await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "SALDO MEMBER");
-        }
+        // Kirim Pesan
+        if (message) await sendTelegramMessage(message);
 
-        return res.status(200).json({ status: 'ok' });
-    } catch (e) {
-        console.error(e);
-        return res.status(500).json({ error: e.message });
+        // Respon ke Frontend (Biar gak timeout)
+        res.status(200).json({ status: 'OK', target: 'Telegram' });
+
+    } catch (error) {
+        console.error("Notify Handler Error:", error);
+        res.status(200).json({ status: 'Error handled' });
     }
 };
