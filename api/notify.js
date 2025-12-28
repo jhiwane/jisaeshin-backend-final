@@ -3,12 +3,14 @@ const { sendMessage } = require('./botConfig');
 // Import Otak Utama
 const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
 
-const ADMIN_CHAT_ID = '1383656187'; // ID Admin Anda
+const ADMIN_CHAT_ID = '1383656187'; // ID Admin Anda (Pastikan benar)
 
 module.exports = async function(req, res) {
     const { orderId, type, buyerContact, message, total, items } = req.body;
 
     try {
+        console.log(`[NOTIFY] Receiving: ${orderId} | Type: ${type}`);
+
         // ==========================================
         // 1. AUTO ORDER (MIDTRANS / WEB)
         // ==========================================
@@ -22,7 +24,7 @@ module.exports = async function(req, res) {
                 });
             }
 
-            const msg = `⚡️ <b>PESANAN OTOMATIS (WEB)</b>\n` +
+            const msg = `⚡️ <b>PESANAN OTOMATIS (MIDTRANS)</b>\n` +
                         `🆔 ID: <code>${orderId}</code>\n` +
                         `💰 Total: Rp ${(parseInt(total)||0).toLocaleString()}\n\n` +
                         `${itemsDetail}\n` +
@@ -44,7 +46,42 @@ module.exports = async function(req, res) {
         } 
         
         // ==========================================
-        // 2. KOMPLAIN DARI USER
+        // 2. PEMBAYARAN VIA SALDO (NEW FEATURE) 💎
+        // ==========================================
+        else if (type === 'saldo') {
+            let itemsDetail = "";
+            if (items && Array.isArray(items)) {
+                items.forEach(i => {
+                    const note = i.note ? `\n   📝 <i>Input: ${i.note}</i>` : '';
+                    itemsDetail += `💎 <b>${i.name}</b>\n   Qty: ${i.qty} x Rp${(parseInt(i.price)||0).toLocaleString()}${note}\n`;
+                });
+            }
+
+            // Pesan Awal: Memberitahu Admin ada member beli pakai Saldo
+            const msg = `💎 <b>PESANAN VIA SALDO (MEMBER)</b>\n` +
+                        `🆔 ID: <code>${orderId}</code>\n` +
+                        `👤 User: ${buyerContact || 'Member'}\n` +
+                        `💰 Total: Rp ${(parseInt(total)||0).toLocaleString()}\n\n` +
+                        `${itemsDetail}\n` +
+                        `⚙️ <i>Memverifikasi & memotong stok...</i>`;
+
+            await sendMessage(ADMIN_CHAT_ID, msg);
+
+            // --- EKSEKUSI STOK (Sama persis kayak Auto) ---
+            const result = await processOrderStock(orderId);
+
+            if (result.success) {
+                // Stok Ada -> Kirim Notif Sukses ke Telegram Admin
+                await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "SALDO/MEMBER");
+            } else {
+                // Stok Kosong -> Minta Input Manual
+                await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>STOK SALDO GAGAL/KOSONG</b>\n${result.logs.join('\n')}`);
+                await showManualInputMenu(ADMIN_CHAT_ID, orderId, result.items);
+            }
+        }
+
+        // ==========================================
+        // 3. KOMPLAIN DARI USER
         // ==========================================
         else if (type === 'complaint') {
             const text = `⚠️ <b>LAPORAN MASALAH (KOMPLAIN)</b>\n\n` +
@@ -61,7 +98,7 @@ module.exports = async function(req, res) {
         }
         
         // ==========================================
-        // 3. KONFIRMASI PEMBAYARAN MANUAL
+        // 4. KONFIRMASI PEMBAYARAN MANUAL
         // ==========================================
         else if (type === 'manual') {
             let itemsDetail = "";
@@ -91,7 +128,7 @@ module.exports = async function(req, res) {
 
         return res.status(200).json({ status: 'ok' });
     } catch (e) {
-        console.error(e);
+        console.error("[Notify Error]:", e);
         return res.status(500).json({ error: e.message });
     }
 };
