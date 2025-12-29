@@ -1,8 +1,9 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
 
-// ... (Fungsi processOrderStock BIARKAN TETAP SAMA sprti sebelumnya) ...
-// ... COPY PASTE KODE processOrderStock YANG LAMA DI SINI ...
+// ==========================================
+// 1. PROSES STOK (TRANSACTION)
+// ==========================================
 async function processOrderStock(orderId) {
     const orderRef = db.collection('orders').doc(orderId);
     
@@ -16,6 +17,7 @@ async function processOrderStock(orderId) {
         let needManual = false;
 
         for (let i = 0; i < items.length; i++) {
+            // Skip jika data sudah terisi (misal disuntik dari Frontend)
             if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) continue;
 
             const item = items[i];
@@ -29,6 +31,7 @@ async function processOrderStock(orderId) {
             }
 
             const pData = pDoc.data();
+            // Cek apakah produk manual
             const isParentManual = pData.isManual || pData.processType === 'MANUAL';
 
             if (!item.isVariant && isParentManual) {
@@ -40,9 +43,10 @@ async function processOrderStock(orderId) {
             let updateTarget = {};
 
             if (item.isVariant) {
-                const vIdx = pData.variations ? pData.variations.findIndex(v => 
+                // [FIX] Gunakan Optional Chaining (?.) biar gak crash kalo variations null
+                const vIdx = pData.variations?.findIndex(v => 
                     v.name.trim().toLowerCase() === item.variantName.trim().toLowerCase()
-                ) : -1;
+                ) ?? -1;
 
                 if (vIdx !== -1) {
                     const stokVarian = pData.variations[vIdx].items || [];
@@ -56,7 +60,7 @@ async function processOrderStock(orderId) {
                         needManual = true;
                     }
                 } else {
-                    logs.push(`❌ <b>${item.name}</b>: Varian tidak cocok.`);
+                    logs.push(`❌ <b>${item.name}</b>: Varian tidak cocok/hilang.`);
                     needManual = true;
                 }
             } else {
@@ -73,62 +77,79 @@ async function processOrderStock(orderId) {
 
             if (stokDiambil.length > 0) {
                 items[i].data = stokDiambil; 
-                items[i].sn = stokDiambil;
-                items[i].desc = stokDiambil;
+                items[i].sn = stokDiambil; // Backward compatibility
+                // items[i].desc = stokDiambil; // Opsional, biasanya data cukup
                 updateTarget.realSold = (pData.realSold || 0) + item.qty;
                 t.update(pRef, updateTarget);
             }
         }
 
         const finalStatus = needManual ? 'processing' : 'success';
+        // Simpan status baru
         t.update(orderRef, { items: items, status: finalStatus });
 
-        return { success: !needManual, logs, items, status: finalStatus };
+        // [OPTIMASI] Kembalikan orderData terbaru supaya gak perlu fetch ulang di notif
+        return { success: !needManual, logs, items, status: finalStatus, orderData: { ...orderData, items, status: finalStatus } };
     });
 }
 
-// ... (INI YANG DIPERBAIKI UNTUK WA) ...
-async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
-    const snap = await db.collection('orders').doc(orderId).get();
-    const data = snap.data();
+// ==========================================
+// 2. KIRIM NOTIFIKASI (WA LINK FIX)
+// ==========================================
+async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS", preLoadedData = null) {
+    let data;
     
-    // --- LOGIKA WA SUPER KETAT ---
-    let rawHP = data.phoneNumber || "";
+    // [OPTIMASI] Pakai data yang dilempar dari processOrderStock jika ada
+    if (preLoadedData) {
+        data = preLoadedData;
+    } else {
+        const snap = await db.collection('orders').doc(orderId).get();
+        data = snap.data();
+    }
+
+    if (!data) return; // Safety check
     
-    // 1. Bersihkan semua karakter selain angka
+    // --- LOGIKA NOMOR HP ---
+    let rawHP = data.phoneNumber || ""; // Default string kosong
+    
+    // 1. Bersihkan karakter aneh
     let cleanHP = rawHP.replace(/\D/g, ''); 
 
-    // 2. Jika kosong/pendek, coba cari di Note item pertama
-    if (cleanHP.length < 9 && data.items[0]?.note) {
-        let noteNum = data.items[0].note.replace(/\D/g, '');
-        // Validasi: Nomor HP Indo minimal 9-13 digit
+    // 2. Coba ambil dari Note jika HP utama kosong
+    // [FIX CRITICAL] Tambahkan ( || "") agar tidak error replace pada undefined
+    if (cleanHP.length < 9) {
+        let noteToCheck = data.items[0]?.note || ""; 
+        let noteNum = noteToCheck.replace(/\D/g, '');
+        
         if (noteNum.length >= 9 && noteNum.length <= 15) {
             cleanHP = noteNum;
         }
     }
 
-    // 3. Format Prefix (08 -> 628)
+    // 3. Format Prefix Indonesia
     if (cleanHP.startsWith('0')) {
         cleanHP = '62' + cleanHP.slice(1);
     } else if (cleanHP.startsWith('8')) {
         cleanHP = '62' + cleanHP;
     }
 
-    // 4. Validasi Akhir: Jika formatnya aneh, kosongkan saja biar link WA ngebuka Contact Picker
+    // 4. Validasi Akhir
     if (cleanHP.length < 10 || !cleanHP.startsWith('62')) {
-        cleanHP = ""; 
+        cleanHP = ""; // Kosongkan biar jadi link netral
     }
 
-    // Pesan
+    // Susun Pesan
     let msg = `Halo, Pesanan *${orderId}* Sukses!\n\n`;
     data.items.forEach(i => {
         msg += `📦 *${i.name}*\n`;
-        if(i.data && Array.isArray(i.data)) msg += `${i.data.join('\n')}\n\n`;
-        else msg += `-\n\n`;
+        if(i.data && Array.isArray(i.data) && i.data.length > 0) {
+            msg += `${i.data.join('\n')}\n\n`;
+        } else {
+            msg += `(Data terkirim terpisah/kosong)\n\n`;
+        }
     });
     msg += `Terima Kasih!`;
 
-    // Jika cleanHP ada isinya, dia akan direct chat. Jika kosong, dia akan minta pilih kontak.
     const url = cleanHP ? `https://wa.me/${cleanHP}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`;
     
     const keyboard = [
@@ -136,19 +157,21 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
         [{ text: "🛠 REVISI / EDIT DATA", callback_data: `REVISI_${orderId}` }]
     ];
 
-    await sendMessage(chatId, `✅ <b>ORDER SELESAI (${type})</b>\nID: ${orderId}\nStatus: Success\n\n👇 <b>Opsi Lanjutan:</b>`, { 
+    await sendMessage(chatId, `✅ <b>ORDER SELESAI (${type})</b>\nID: <code>${orderId}</code>\nStatus: Success\n\n👇 <b>Opsi Lanjutan:</b>`, { 
         reply_markup: { inline_keyboard: keyboard } 
     });
 }
 
-// ... (Fungsi showManualInputMenu BIARKAN TETAP SAMA) ...
+// ... (showManualInputMenu TETAP SAMA) ...
 async function showManualInputMenu(chatId, orderId, items) {
     let msg = `📋 <b>INPUT / EDIT DATA PRODUK</b>\nOrder ID: <code>${orderId}</code>\n\nPilih item yang ingin diisi/diubah:\n`;
     const kb = [];
     items.forEach((item, i) => {
         const ready = (item.data && Array.isArray(item.data) && item.data.length > 0);
         msg += `\n${i+1}. ${item.name} [${ready ? '✅ TERISI' : '❌ KOSONG'}]`;
-        const btnText = ready ? `📝 UBAH DATA: ${item.name.slice(0, 10)}...` : `✏️ ISI DATA: ${item.name.slice(0, 10)}...`;
+        // Potong nama jika terlalu panjang agar tombol rapi
+        const shortName = item.name.length > 15 ? item.name.slice(0, 15) + '...' : item.name;
+        const btnText = ready ? `📝 UBAH: ${shortName}` : `✏️ ISI: ${shortName}`;
         kb.push([{ text: btnText, callback_data: `FILL_${orderId}_${i}` }]);
     });
     kb.push([{ text: "🚀 SELESAI (KIRIM NOTIF)", callback_data: `DONE_${orderId}` }]);
