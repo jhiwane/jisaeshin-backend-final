@@ -2,22 +2,39 @@ const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
 
 /**
- * FUNGSI BANTUAN: MATA ELANG (Cari Stok dimanapun dia bersembunyi)
- * Bot akan mengecek field: items, data, accounts, codes, stokList.
+ * FUNGSI PENCARI STOK "SAPU JAGAT" (UNIVERSAL)
+ * Bot tidak lagi peduli nama fieldnya 'items' atau 'data'.
+ * Dia akan mengambil ARRAY PERTAMA yang dia temukan di dalam objek.
  */
-function findStockInObject(obj) {
+function grabAnyStockArray(obj) {
     if (!obj) return [];
+    
+    // 1. Prioritas Utama: Field standar
     if (Array.isArray(obj.items) && obj.items.length > 0) return obj.items;
     if (Array.isArray(obj.data) && obj.data.length > 0) return obj.data;
     if (Array.isArray(obj.accounts) && obj.accounts.length > 0) return obj.accounts;
     if (Array.isArray(obj.codes) && obj.codes.length > 0) return obj.codes;
     if (Array.isArray(obj.stok) && obj.stok.length > 0) return obj.stok;
+
+    // 2. Prioritas Darurat: Cari field APAPUN yang isinya Array dan bukan 'variations'
+    const keys = Object.keys(obj);
+    for (const key of keys) {
+        // Skip field 'variations' supaya tidak rekursif aneh
+        if (key === 'variations') continue; 
+        
+        const val = obj[key];
+        // Jika ketemu Array dan ada isinya, AMBIL!
+        if (Array.isArray(val) && val.length > 0) {
+            console.log(`[DEBUG] Menemukan stok di field tidak dikenal: '${key}'`);
+            return val;
+        }
+    }
+
     return [];
 }
 
 /**
- * FUNGSI BANTUAN: NORMALISASI TEKS
- * Menghapus spasi ganda, spasi pinggir, dan huruf besar/kecil.
+ * Normalisasi String (Hapus spasi, lowercase)
  */
 function normalize(str) {
     return (str || "").toString().toLowerCase().trim().replace(/\s+/g, '');
@@ -36,105 +53,121 @@ async function processOrderStock(orderId) {
             let logs = [];
             
             for (let i = 0; i < items.length; i++) {
-                // Skip item yang sudah ada isinya
+                // Skip jika item ini SUDAH TERISI
                 if (items[i].data && items[i].data.length > 0) continue;
 
                 const item = items[i];
                 const pid = item.isVariant ? item.originalId : item.id;
                 
+                // Ambil Produk Master
                 const pRef = db.collection('products').doc(pid);
                 const pDoc = await t.get(pRef);
 
                 if (!pDoc.exists) {
-                    logs.push(`⚠️ ${item.name}: Produk induk HILANG dari DB.`);
+                    logs.push(`⚠️ ${item.name}: Produk induk HILANG (ID: ${pid}).`);
                     continue; 
                 }
 
                 const pData = pDoc.data();
                 
-                // Cek Mode Manual Admin
+                // LOG DEBUG: Tampilkan isi produk di console server biar tau strukturnya
+                console.log(`[CHECKING] ${item.name} | Variant: ${item.isVariant ? 'YES' : 'NO'}`);
+
                 if (pData.processType === 'MANUAL') {
-                    logs.push(`ℹ️ ${item.name}: Mode Manual (Sesuai Setting DB).`);
+                    logs.push(`ℹ️ ${item.name}: Mode Manual Admin.`);
                     continue;
                 }
 
                 let stokDiambil = [];
                 let sisaStok = [];
-                let targetField = ""; // Untuk tau field mana yang diupdate (items/accounts/dll)
+                let targetLocation = null; // Object referensi (variasi atau main product)
+                let targetField = ""; // Nama field yang akan diupdate
                 
                 // --- KASUS 1: ITEM VARIASI ---
                 if (item.isVariant) {
                     const targetName = normalize(item.variantName);
                     const variations = pData.variations || [];
                     
-                    // CARI VARIAN YANG COCOK
+                    // Cari Variasi (Fuzzy Match)
                     const vIdx = variations.findIndex(v => normalize(v.name) === targetName);
 
                     if (vIdx !== -1) {
-                        // Varian ketemu, sekarang cari stoknya pakai "Mata Elang"
-                        const rawStok = findStockInObject(variations[vIdx]);
+                        // Variasi Ketemu. Sekarang BONGKAR isinya cari Array
+                        const rawStok = grabAnyStockArray(variations[vIdx]);
                         
                         if (rawStok.length > 0) {
                             const ambilQty = Math.min(item.qty, rawStok.length);
                             stokDiambil = rawStok.slice(0, ambilQty);
                             sisaStok = rawStok.slice(ambilQty);
-                            
-                            // Update object variation di memory
-                            // Kita harus tau nama field aslinya agar update DB benar
-                            if(variations[vIdx].items) variations[vIdx].items = sisaStok;
-                            else if(variations[vIdx].data) variations[vIdx].data = sisaStok;
-                            else if(variations[vIdx].accounts) variations[vIdx].accounts = sisaStok;
-                            else variations[vIdx].items = sisaStok; // Default fallback
 
-                            // Target update Transaction
-                            targetField = "variations"; 
-                            logs.push(`✅ ${item.name}: Stok Varian OK.`);
+                            // Update Memory
+                            // Kita harus cari tau field mana yang diambil tadi
+                            // Trik: Timpa field 'items' standar atau cari field aslinya
+                            // Untuk aman: Kita cari lagi field mana yang punya array ini
+                            let foundKey = 'items'; // default
+                            for(const k of Object.keys(variations[vIdx])) {
+                                if(variations[vIdx][k] === rawStok) foundKey = k;
+                            }
+                            
+                            variations[vIdx][foundKey] = sisaStok;
+                            
+                            // Siapkan Update DB
+                            targetLocation = "variations";
+                            logs.push(`✅ ${item.name}: Stok Varian OK (Field: ${foundKey}).`);
                         } else {
-                            logs.push(`❌ ${item.name}: Varian Ketemu, TAPI STOK KOSONG (0).`);
+                            // Cek apakah mungkin user salah taruh stok di produk utama?
+                            const backupStok = grabAnyStockArray(pData);
+                            if(backupStok.length > 0) {
+                                logs.push(`⚠️ ${item.name}: Stok Varian Kosong, tapi ada di Utama. (Tidak diambil demi keamanan).`);
+                            }
+                            logs.push(`❌ ${item.name}: Varian Ketemu, TAPI KOSONG/ARRAY TIDAK DITEMUKAN.`);
+                            console.log("Structure Varian yg Gagal:", JSON.stringify(variations[vIdx]));
                         }
                     } else {
-                        // Debugging Canggih: Kasih tau admin varian apa aja yang ada di DB
-                        const listVarianDB = variations.map(v => v.name).join(', ');
-                        logs.push(`❌ ${item.name}: GAK COCOK. Order: "${item.variantName}". DB punya: [${listVarianDB}]`);
+                         // Debug: Print semua nama varian yang ada
+                        const listVarian = variations.map(v => v.name).join(', ');
+                        logs.push(`❌ ${item.name}: Nama Varian SALAH. Order: "${item.variantName}". DB: [${listVarian}]`);
                     }
                 } 
                 
                 // --- KASUS 2: ITEM UTAMA (NON VARIAN) ---
                 else {
-                    const rawStok = findStockInObject(pData);
+                    const rawStok = grabAnyStockArray(pData);
                     
                     if (rawStok.length > 0) {
                         const ambilQty = Math.min(item.qty, rawStok.length);
                         stokDiambil = rawStok.slice(0, ambilQty);
                         sisaStok = rawStok.slice(ambilQty);
                         
-                        // Tentukan field mana yang mau diupdate di DB
-                        if(pData.items) targetField = "items";
-                        else if(pData.data) targetField = "data";
-                        else if(pData.accounts) targetField = "accounts";
-                        else targetField = "items";
+                        // Cari nama field aslinya
+                        let foundKey = 'items';
+                        for(const k of Object.keys(pData)) {
+                             // Hati2 jangan ambil 'variations'
+                            if(k !== 'variations' && pData[k] === rawStok) foundKey = k;
+                        }
 
-                        logs.push(`✅ ${item.name}: Stok Utama OK.`);
+                        targetLocation = "main";
+                        targetField = foundKey;
+                        logs.push(`✅ ${item.name}: Stok Utama OK (Field: ${foundKey}).`);
                     } else {
-                        logs.push(`❌ ${item.name}: Stok Utama KOSONG/Tidak Ditemukan.`);
+                        logs.push(`❌ ${item.name}: Stok Utama KOSONG.`);
                     }
                 }
 
                 // --- EKSEKUSI SIMPAN DATA ---
                 if (stokDiambil.length > 0) {
-                    // Masukkan ke Order Item
+                    // Update Order Item
                     items[i].data = stokDiambil; 
-                    items[i].sn = stokDiambil; 
-                    items[i].desc = stokDiambil.join('\n'); // Format string
-                    items[i].processTime = new Date().toISOString();
-
-                    // Update Produk DB
+                    items[i].sn = stokDiambil; // Field SN diisi
+                    items[i].desc = stokDiambil.join('\n'); // Field Desc diisi (utk web legacy)
+                    
+                    // Update DB Produk
                     let updateDoc = { realSold: (pData.realSold || 0) + stokDiambil.length };
                     
-                    if (item.isVariant) {
-                        updateDoc.variations = pData.variations; // Update seluruh array variasi
-                    } else {
-                        updateDoc[targetField] = sisaStok; // Update field (items/accounts/dll)
+                    if (targetLocation === "variations") {
+                        updateDoc.variations = pData.variations;
+                    } else if (targetLocation === "main") {
+                        updateDoc[targetField] = sisaStok;
                     }
                     
                     t.update(pRef, updateDoc);
@@ -156,10 +189,13 @@ async function processOrderStock(orderId) {
     }
 }
 
+/**
+ * SEND NOTIFIKASI
+ */
 async function sendSuccessNotification(chatId, orderId, logs = []) {
     try {
         const snap = await db.collection('orders').doc(orderId).get();
-        if (!snap.exists) return;
+        if(!snap.exists) return;
         const data = snap.data();
         
         // Format Nomor HP
@@ -173,9 +209,10 @@ async function sendSuccessNotification(chatId, orderId, logs = []) {
         data.items.forEach(i => {
             msgWA += `📦 *${i.name}* (x${i.qty})\n`;
             if (i.data && i.data.length > 0) {
+                // Tampilkan Data
                 msgWA += `${i.data.join('\n')}\n\n`;
             } else {
-                msgWA += `_Proses Input Manual..._\n\n`;
+                msgWA += `_Data sedang disiapkan Admin..._\n\n`;
                 adaKosong = true;
             }
         });
@@ -183,16 +220,13 @@ async function sendSuccessNotification(chatId, orderId, logs = []) {
 
         const url = (hp.length > 9) ? `https://wa.me/${hp}?text=${encodeURIComponent(msgWA)}` : `https://wa.me/?text=${encodeURIComponent(msgWA)}`;
 
-        // LOGIKA DEBUG DI CHAT ADMIN
-        const statusIcon = adaKosong ? "⚠️ PARTIAL" : "✅ LENGKAP";
-        let adminMsg = `<b>DONE</b>\nRef: <code>${orderId}</code>\nStatus: ${statusIcon}\n\n`;
+        // Pesan ke Admin
+        const statusIcon = adaKosong ? "⚠️ PARTIAL/KOSONG" : "✅ LENGKAP";
+        let adminMsg = `<b>DONE (AUTO)</b>\nRef: <code>${orderId}</code>\nStatus: ${statusIcon}\n\n`;
         
-        // Tampilkan Log Error Stok secara detail supaya tidak bingung
-        if (logs.length > 0) {
-            // Filter log yang error saja biar gak penuh
-            const errLogs = logs.filter(l => l.includes('❌') || l.includes('⚠️'));
-            if(errLogs.length > 0) adminMsg += `<b>Log Masalah:</b>\n${errLogs.join('\n')}\n`;
-        }
+        // Filter log error biar admin tau kenapa
+        const errLogs = logs.filter(l => l.includes('❌') || l.includes('⚠️'));
+        if (errLogs.length > 0) adminMsg += `<b>Log:</b>\n${errLogs.join('\n')}`;
 
         const keyboard = [
             [{ text: "📲 Chat WA User", url: url }],
