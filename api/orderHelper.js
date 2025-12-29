@@ -2,245 +2,168 @@ const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
 
 /**
- * FUNGSI UTAMA: PROSES STOK (ANTI-MACET EDITION)
- * Mengembalikan objek: { success: boolean, logs: array, items: array }
- * Tidak akan pernah throw error (bikin bengong), tapi return error log.
+ * LOGIKA INTELIJEN PENCARI STOK (DEEP SEARCH)
+ * - Mencari di item utama & variasi.
+ * - Mengembalikan status sukses agar Web langsung update.
  */
 async function processOrderStock(orderId) {
-    try {
-        const orderRef = db.collection('orders').doc(orderId);
+    const orderRef = db.collection('orders').doc(orderId);
 
-        // Kita gunakan Transaction agar stok aman (tidak minus berebut)
+    try {
         const result = await db.runTransaction(async (t) => {
             const orderDoc = await t.get(orderRef);
-            
-            // 1. Cek Apakah Order Ada
-            if (!orderDoc.exists) {
-                return { 
-                    success: false, 
-                    logs: ["❌ Order ID tidak ditemukan di Database."], 
-                    items: [] 
-                };
-            }
+            if (!orderDoc.exists) return { success: false, logs: ["ID Not Found"] };
             
             const orderData = orderDoc.data();
             let items = orderData.items || [];
             let logs = [];
-            let needManual = false;
-            let hasChange = false; // Penanda apakah ada perubahan data
-
-            // 2. Loop Setiap Item
+            
+            // Loop Item
             for (let i = 0; i < items.length; i++) {
-                // Skip jika item ini SUDAH terisi sebelumnya
-                if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) {
-                    continue; 
-                }
+                // Skip jika data sudah terisi (revisi partial)
+                if (items[i].data && items[i].data.length > 0) continue;
 
                 const item = items[i];
                 const pid = item.isVariant ? item.originalId : item.id;
                 
-                // Cek Produk di DB
                 const pRef = db.collection('products').doc(pid);
                 const pDoc = await t.get(pRef);
 
                 if (!pDoc.exists) {
-                    logs.push(`⚠️ <b>${item.name}</b>: Produk induk dihapus/hilang dari DB.`);
-                    needManual = true; continue;
+                    logs.push(`⚠️ ${item.name}: Produk induk hilang.`);
+                    continue; 
                 }
 
                 const pData = pDoc.data();
-                
-                // Cek apakah produk ini mode MANUAL (bukan otomatis)
-                const isParentManual = pData.isManual || pData.processType === 'MANUAL';
-                if (!item.isVariant && isParentManual) {
-                    logs.push(`ℹ️ <b>${item.name}</b>: Produk tipe Manual (Tunggu Admin).`);
-                    needManual = true; continue;
+                // Jika manual murni, skip (biarkan kosong utk diisi admin nanti)
+                if (pData.processType === 'MANUAL') {
+                    logs.push(`ℹ️ ${item.name}: Mode Manual Admin.`);
+                    continue;
                 }
 
                 let stokDiambil = [];
                 let updateTarget = {};
 
-                // 3. Logika Pengambilan Stok (Varian vs Utama)
+                // --- LOGIKA DEEP SEARCH (UTAMA & VARIASI) ---
                 if (item.isVariant) {
+                    // Cari variasi yang cocok
                     const vIdx = pData.variations ? pData.variations.findIndex(v => 
                         v.name.trim().toLowerCase() === item.variantName.trim().toLowerCase()
                     ) : -1;
 
                     if (vIdx !== -1) {
-                        const stokVarian = pData.variations[vIdx].items || [];
-                        if (stokVarian.length >= item.qty) {
-                            stokDiambil = stokVarian.slice(0, item.qty);
-                            // Update sisa stok di memory
-                            pData.variations[vIdx].items = stokVarian.slice(item.qty);
+                        const rawStok = pData.variations[vIdx].items || [];
+                        // Ambil sesuai Qty (Kalau kurang, ambil semua yg ada)
+                        const ambilQty = Math.min(item.qty, rawStok.length);
+                        
+                        if (ambilQty > 0) {
+                            stokDiambil = rawStok.slice(0, ambilQty);
+                            pData.variations[vIdx].items = rawStok.slice(ambilQty); // Sisanya
                             updateTarget = { variations: pData.variations };
-                            logs.push(`✅ <b>${item.name}</b>: Stok Sukses.`);
+                            logs.push(`✅ ${item.name}: Dapat ${ambilQty} item.`);
                         } else {
-                            logs.push(`❌ <b>${item.name}</b>: Stok Varian KURANG (Sisa ${stokVarian.length}).`);
-                            needManual = true;
+                            logs.push(`❌ ${item.name}: Stok Varian Kosong.`);
                         }
-                    } else {
-                        logs.push(`❌ <b>${item.name}</b>: Nama Varian tidak cocok di DB.`);
-                        needManual = true;
                     }
                 } else {
-                    // Produk Biasa (Non Varian)
-                    const stokUtama = pData.items || [];
-                    if (stokUtama.length >= item.qty) {
-                        stokDiambil = stokUtama.slice(0, item.qty);
-                        updateTarget = { items: stokUtama.slice(item.qty) };
-                        logs.push(`✅ <b>${item.name}</b>: Stok Sukses.`);
+                    // Produk Utama
+                    const rawStok = pData.items || [];
+                    const ambilQty = Math.min(item.qty, rawStok.length);
+
+                    if (ambilQty > 0) {
+                        stokDiambil = rawStok.slice(0, ambilQty);
+                        updateTarget = { items: rawStok.slice(ambilQty) };
+                        logs.push(`✅ ${item.name}: Dapat ${ambilQty} item.`);
                     } else {
-                        logs.push(`❌ <b>${item.name}</b>: Stok Utama HABIS.`);
-                        needManual = true;
+                        logs.push(`❌ ${item.name}: Stok Utama Kosong.`);
                     }
                 }
 
-                // 4. Jika Stok Berhasil Diambil -> Simpan
+                // Simpan Stok ke Item Order
                 if (stokDiambil.length > 0) {
                     items[i].data = stokDiambil; 
                     items[i].sn = stokDiambil;
-                    items[i].desc = stokDiambil; // Backup
                     
-                    // Update Stok Produk di DB
-                    updateTarget.realSold = (pData.realSold || 0) + item.qty;
+                    // Update Stok Database Produk
+                    updateTarget.realSold = (pData.realSold || 0) + stokDiambil.length;
                     t.update(pRef, updateTarget);
-                    hasChange = true;
                 }
             }
 
-            // 5. Tentukan Status Akhir Order
-            // Jika ada yang butuh manual, status = processing. Jika semua beres = success.
-            // TAPI, kita cek dulu apakah semua items sudah terisi penuh?
-            const allFilled = items.every(itm => itm.data && itm.data.length > 0);
-            const finalStatus = allFilled ? 'success' : 'processing';
+            // --- POINT PENTING: ALWAYS SUCCESS ---
+            // Kita set status 'success' agar Web user langsung tampil (entah isinya ada atau kosong)
+            t.update(orderRef, { items: items, status: 'success' });
 
-            // Update Order di DB
-            if (hasChange || finalStatus !== orderData.status) {
-                t.update(orderRef, { items: items, status: finalStatus });
-            }
-
-            // Return hasil transaksi
-            return { 
-                success: allFilled, // True jika SEMUA item beres
-                logs: logs, 
-                items: items,
-                status: finalStatus
-            };
+            return { success: true, logs, items };
         });
 
         return result;
 
     } catch (e) {
-        console.error("🔥 Error processOrderStock:", e);
-        // RETURN ERROR SAFE OBJECT (Supaya frontend/bot tidak bengong)
-        return { 
-            success: false, 
-            logs: [`🔥 SYSTEM ERROR: ${e.message}`], 
-            items: [] 
-        };
+        console.error("Stock Error:", e);
+        return { success: false, logs: [e.message], items: [] };
     }
 }
 
 /**
- * FUNGSI NOTIFIKASI WA (SUPPORT PARTIAL)
- * Hanya mengirimkan kode untuk item yang SUDAH ADA datanya.
+ * KIRIM NOTIFIKASI FINAL (Done ✅)
+ * Menampilkan Link WA dan Tombol Revisi
  */
-async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
-    try {
-        const snap = await db.collection('orders').doc(orderId).get();
-        if (!snap.exists) return;
-        
-        const data = snap.data();
-        
-        // --- LOGIKA CLEANING NOMOR HP ---
-        let rawHP = data.buyerPhone || data.phoneNumber || "";
-        let cleanHP = rawHP.replace(/\D/g, ''); 
+async function sendSuccessNotification(chatId, orderId, logs = []) {
+    const snap = await db.collection('orders').doc(orderId).get();
+    const data = snap.data();
+    
+    // Format Nomor HP
+    let hp = (data.buyerPhone || "").replace(/\D/g,'');
+    if(hp.startsWith('0')) hp = '62'+hp.slice(1);
+    if(hp.startsWith('8')) hp = '62'+hp;
+    if(hp.length < 10) hp = "";
 
-        // Coba cari di Note jika kosong
-        if (cleanHP.length < 9 && data.items && data.items[0]?.note) {
-            let noteNum = data.items[0].note.replace(/\D/g, '');
-            if (noteNum.length >= 9 && noteNum.length <= 15) cleanHP = noteNum;
+    // Cek Kelengkapan Data untuk Pesan WA
+    let msgWA = `Halo Kak, Pesanan *${orderId}*:\n\n`;
+    let adaKosong = false;
+
+    data.items.forEach(i => {
+        msgWA += `📦 *${i.name}* (x${i.qty})\n`;
+        if (i.data && i.data.length > 0) {
+            msgWA += `${i.data.join('\n')}\n\n`;
+        } else {
+            msgWA += `_DATA BELUM MUNCUL (Silakan Refresh/Hub Admin)_\n\n`;
+            adaKosong = true;
         }
-        // Format 62
-        if (cleanHP.startsWith('0')) cleanHP = '62' + cleanHP.slice(1);
-        else if (cleanHP.startsWith('8')) cleanHP = '62' + cleanHP;
+    });
+    msgWA += `Terima Kasih!`;
 
-        // Validasi Akhir
-        if (cleanHP.length < 10 || !cleanHP.startsWith('62')) cleanHP = ""; 
+    const url = hp ? `https://wa.me/${hp}?text=${encodeURIComponent(msgWA)}` : `https://wa.me/?text=${encodeURIComponent(msgWA)}`;
 
-        // --- MENYUSUN PESAN WA ---
-        let msg = `Halo Kak ${data.buyerName || ''}, Pesanan *${orderId}* Kamu:\n\n`;
-        let hasContent = false;
+    // --- PESAN LAPORAN ADMIN (DONE ✅) ---
+    const statusIcon = adaKosong ? "⚠️ PARTIAL/KOSONG" : "✅ LENGKAP";
+    let adminMsg = `<b>DONE</b> ✅\nID: <code>${orderId}</code>\nStatus: ${statusIcon}\n\n`;
+    
+    // Jika ada log error/kosong, tampilkan sedikit
+    if (logs.length > 0) adminMsg += `Log: ${logs.join(', ')}\n`;
+    
+    adminMsg += `\n<i>Data sudah tampil di Web (Status: Success).</i>`;
 
-        data.items.forEach(i => {
-            msg += `📦 *${i.name}*\n`;
-            
-            // Cek apakah item ini sudah punya data (Akun/Voucher)
-            if(i.data && Array.isArray(i.data) && i.data.length > 0) {
-                // Tampilkan Datanya
-                msg += `${i.data.join('\n')}\n\n`;
-                hasContent = true;
-            } else {
-                // Jika kosong (karena stok habis/partial), beri info pending
-                msg += `_Sedang diproses Admin (Mohon Ditunggu)_\n\n`;
-            }
-        });
-        msg += `Terima Kasih! Simpan bukti ini ya.`;
+    const keyboard = [
+        [{ text: "📲 Chat WA User", url: url }],
+        // Tombol ini SELALU ADA untuk revisi/input manual kapan saja
+        [{ text: "🛠 REVISI / INPUT MANUAL", callback_data: `REVISI_${orderId}` }]
+    ];
 
-        // Generate Link WA
-        const url = cleanHP 
-            ? `https://wa.me/${cleanHP}?text=${encodeURIComponent(msg)}` 
-            : `https://wa.me/?text=${encodeURIComponent(msg)}`;
-        
-        // --- TOMBOL BOT TELEGRAM ---
-        const keyboard = [
-            [{ text: "📲 Chat WA User", url: url }],
-            // Tombol revisi tetap ada buat jaga-jaga
-            [{ text: "🛠 REVISI / EDIT DATA", callback_data: `REVISI_${orderId}` }]
-        ];
-
-        // Kirim Pesan ke Admin Bot
-        // Jika data ada isinya, bilang SUKSES. Jika masih ada yang pending, bilang PARTIAL.
-        const statusText = hasContent ? "DATA TERKIRIM" : "MENUNGGU MANUAL";
-        
-        await sendMessage(chatId, `✅ <b>ORDER PROCESSED (${type})</b>\nID: ${orderId}\nStatus: ${statusText}\n\n👇 <b>Kirim ke Pembeli:</b>`, { 
-            reply_markup: { inline_keyboard: keyboard } 
-        });
-
-    } catch (e) {
-        console.error("Error sendSuccessNotification:", e);
-    }
+    await sendMessage(chatId, adminMsg, { reply_markup: { inline_keyboard: keyboard } });
 }
 
-/**
- * FUNGSI MENU INPUT MANUAL
- * Digunakan saat stok kosong atau revisi
- */
+// Fungsi Menu Input Manual (Tetap diperlukan untuk tombol REVISI)
 async function showManualInputMenu(chatId, orderId, items) {
-    if (!items || !Array.isArray(items)) {
-        // Fallback jika items undefined (ambil dari DB)
-        const s = await db.collection('orders').doc(orderId).get();
-        if(s.exists) items = s.data().items;
-        else items = [];
-    }
-
-    let msg = `📋 <b>INPUT / EDIT DATA PRODUK</b>\nOrder ID: <code>${orderId}</code>\n\nPilih item yang ingin diisi/diubah:\n`;
+    let msg = `🛠 <b>REVISI / INPUT DATA</b>\nRef: ${orderId}\n\nKlik item untuk edit:`;
     const kb = [];
-    
     items.forEach((item, i) => {
-        // Cek status per item
-        const ready = (item.data && Array.isArray(item.data) && item.data.length > 0);
-        
-        msg += `\n${i+1}. ${item.name} [${ready ? '✅ TERISI' : '❌ KOSONG'}]`;
-        
-        // Tombol
-        const btnText = ready ? `📝 UBAH: ${item.name.slice(0, 10)}...` : `✏️ ISI: ${item.name.slice(0, 10)}...`;
-        kb.push([{ text: btnText, callback_data: `FILL_${orderId}_${i}` }]);
+        const status = (item.data && item.data.length > 0) ? '✅' : '❌';
+        kb.push([{ text: `${status} ${item.name}`, callback_data: `FILL_${orderId}_${i}` }]);
     });
-
-    // Tombol Selesai
-    kb.push([{ text: "🚀 SELESAI (KIRIM NOTIF)", callback_data: `DONE_${orderId}` }]);
-    
+    // Tombol Done untuk menutup menu
+    kb.push([{ text: "Selesai (Tutup Menu)", callback_data: `CLOSE_MENU` }]); 
     await sendMessage(chatId, msg, { reply_markup: { inline_keyboard: kb } });
 }
 
