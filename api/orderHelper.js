@@ -2,9 +2,27 @@ const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
 
 /**
- * LOGIKA BARU: DEEP SEARCH & FUZZY MATCH
- * Mencari stok dengan toleransi tinggi (Hapus spasi, lowercase).
+ * FUNGSI BANTUAN: MATA ELANG (Cari Stok dimanapun dia bersembunyi)
+ * Bot akan mengecek field: items, data, accounts, codes, stokList.
  */
+function findStockInObject(obj) {
+    if (!obj) return [];
+    if (Array.isArray(obj.items) && obj.items.length > 0) return obj.items;
+    if (Array.isArray(obj.data) && obj.data.length > 0) return obj.data;
+    if (Array.isArray(obj.accounts) && obj.accounts.length > 0) return obj.accounts;
+    if (Array.isArray(obj.codes) && obj.codes.length > 0) return obj.codes;
+    if (Array.isArray(obj.stok) && obj.stok.length > 0) return obj.stok;
+    return [];
+}
+
+/**
+ * FUNGSI BANTUAN: NORMALISASI TEKS
+ * Menghapus spasi ganda, spasi pinggir, dan huruf besar/kecil.
+ */
+function normalize(str) {
+    return (str || "").toString().toLowerCase().trim().replace(/\s+/g, '');
+}
+
 async function processOrderStock(orderId) {
     const orderRef = db.collection('orders').doc(orderId);
 
@@ -17,94 +35,114 @@ async function processOrderStock(orderId) {
             let items = orderData.items || [];
             let logs = [];
             
-            // Loop Item
             for (let i = 0; i < items.length; i++) {
-                // Skip jika item ini SUDAH TERISI (biar gak nimpa data revisi manual sebelumnya)
+                // Skip item yang sudah ada isinya
                 if (items[i].data && items[i].data.length > 0) continue;
 
                 const item = items[i];
                 const pid = item.isVariant ? item.originalId : item.id;
                 
-                // Ambil Produk Master
                 const pRef = db.collection('products').doc(pid);
                 const pDoc = await t.get(pRef);
 
                 if (!pDoc.exists) {
-                    logs.push(`⚠️ ${item.name}: Produk induk dihapus dari DB.`);
+                    logs.push(`⚠️ ${item.name}: Produk induk HILANG dari DB.`);
                     continue; 
                 }
 
                 const pData = pDoc.data();
                 
-                // Jika produk diset MANUAL murni oleh Admin
+                // Cek Mode Manual Admin
                 if (pData.processType === 'MANUAL') {
-                    logs.push(`ℹ️ ${item.name}: Mode Manual Admin.`);
+                    logs.push(`ℹ️ ${item.name}: Mode Manual (Sesuai Setting DB).`);
                     continue;
                 }
 
                 let stokDiambil = [];
-                let updateTarget = {};
-
-                // --- LOGIKA PENCARIAN STOK (DIPERBAIKI) ---
+                let sisaStok = [];
+                let targetField = ""; // Untuk tau field mana yang diupdate (items/accounts/dll)
+                
+                // --- KASUS 1: ITEM VARIASI ---
                 if (item.isVariant) {
-                    // Normalisasi Nama Varian Order (kecilkan semua, hapus spasi)
-                    const targetName = (item.variantName || "").toLowerCase().trim().replace(/\s+/g, '');
-                    
-                    // Cari di Array Variations Database
+                    const targetName = normalize(item.variantName);
                     const variations = pData.variations || [];
-                    const vIdx = variations.findIndex(v => {
-                        const dbName = (v.name || "").toLowerCase().trim().replace(/\s+/g, '');
-                        return dbName === targetName;
-                    });
+                    
+                    // CARI VARIAN YANG COCOK
+                    const vIdx = variations.findIndex(v => normalize(v.name) === targetName);
 
                     if (vIdx !== -1) {
-                        const rawStok = variations[vIdx].items || []; // Array stok akun
+                        // Varian ketemu, sekarang cari stoknya pakai "Mata Elang"
+                        const rawStok = findStockInObject(variations[vIdx]);
                         
                         if (rawStok.length > 0) {
-                            // Ambil stok secukupnya
                             const ambilQty = Math.min(item.qty, rawStok.length);
                             stokDiambil = rawStok.slice(0, ambilQty);
+                            sisaStok = rawStok.slice(ambilQty);
                             
-                            // Update sisa stok varian
-                            variations[vIdx].items = rawStok.slice(ambilQty);
-                            updateTarget = { variations: variations };
-                            
-                            logs.push(`✅ ${item.name}: Stok Ditemukan (${ambilQty} pcs).`);
+                            // Update object variation di memory
+                            // Kita harus tau nama field aslinya agar update DB benar
+                            if(variations[vIdx].items) variations[vIdx].items = sisaStok;
+                            else if(variations[vIdx].data) variations[vIdx].data = sisaStok;
+                            else if(variations[vIdx].accounts) variations[vIdx].accounts = sisaStok;
+                            else variations[vIdx].items = sisaStok; // Default fallback
+
+                            // Target update Transaction
+                            targetField = "variations"; 
+                            logs.push(`✅ ${item.name}: Stok Varian OK.`);
                         } else {
-                            logs.push(`❌ ${item.name}: Stok Varian KOSONG (0 pcs).`);
+                            logs.push(`❌ ${item.name}: Varian Ketemu, TAPI STOK KOSONG (0).`);
                         }
                     } else {
-                        // Debugging: Kasih tau admin nama varian gak ketemu
-                        logs.push(`❌ ${item.name}: Nama Varian Tidak Cocok di DB.`);
+                        // Debugging Canggih: Kasih tau admin varian apa aja yang ada di DB
+                        const listVarianDB = variations.map(v => v.name).join(', ');
+                        logs.push(`❌ ${item.name}: GAK COCOK. Order: "${item.variantName}". DB punya: [${listVarianDB}]`);
                     }
-                } else {
-                    // Produk Utama (Non Varian)
-                    const rawStok = pData.items || [];
+                } 
+                
+                // --- KASUS 2: ITEM UTAMA (NON VARIAN) ---
+                else {
+                    const rawStok = findStockInObject(pData);
                     
                     if (rawStok.length > 0) {
                         const ambilQty = Math.min(item.qty, rawStok.length);
                         stokDiambil = rawStok.slice(0, ambilQty);
-                        updateTarget = { items: rawStok.slice(ambilQty) };
-                        logs.push(`✅ ${item.name}: Stok Utama Ditemukan.`);
+                        sisaStok = rawStok.slice(ambilQty);
+                        
+                        // Tentukan field mana yang mau diupdate di DB
+                        if(pData.items) targetField = "items";
+                        else if(pData.data) targetField = "data";
+                        else if(pData.accounts) targetField = "accounts";
+                        else targetField = "items";
+
+                        logs.push(`✅ ${item.name}: Stok Utama OK.`);
                     } else {
-                        logs.push(`❌ ${item.name}: Stok Utama KOSONG.`);
+                        logs.push(`❌ ${item.name}: Stok Utama KOSONG/Tidak Ditemukan.`);
                     }
                 }
 
-                // JIKA STOK KETEMU -> SIMPAN KE ORDER ITEM
+                // --- EKSEKUSI SIMPAN DATA ---
                 if (stokDiambil.length > 0) {
+                    // Masukkan ke Order Item
                     items[i].data = stokDiambil; 
-                    items[i].sn = stokDiambil; // Seringkali frontend baca field ini
-                    items[i].desc = stokDiambil.join('\n'); // Untuk frontend legacy
+                    items[i].sn = stokDiambil; 
+                    items[i].desc = stokDiambil.join('\n'); // Format string
+                    items[i].processTime = new Date().toISOString();
+
+                    // Update Produk DB
+                    let updateDoc = { realSold: (pData.realSold || 0) + stokDiambil.length };
                     
-                    // Kurangi stok di DB Produk
-                    updateTarget.realSold = (pData.realSold || 0) + stokDiambil.length;
-                    t.update(pRef, updateTarget);
+                    if (item.isVariant) {
+                        updateDoc.variations = pData.variations; // Update seluruh array variasi
+                    } else {
+                        updateDoc[targetField] = sisaStok; // Update field (items/accounts/dll)
+                    }
+                    
+                    t.update(pRef, updateDoc);
                 }
             }
 
-            // --- KUNCI LOGIKA: FORCE SUCCESS ---
-            // Apapun hasilnya (kosong/isi), status harus SUCCESS agar tampil di Web
+            // --- FORCE STATUS SUCCESS ---
+            // Agar web menampilkan data (entah kosong atau isi)
             t.update(orderRef, { items: items, status: 'success' });
 
             return { success: true, logs, items };
@@ -114,18 +152,14 @@ async function processOrderStock(orderId) {
 
     } catch (e) {
         console.error("Stock Error:", e);
-        // Tetap return object agar bot tidak crash
-        return { success: false, logs: [`Error System: ${e.message}`], items: [] };
+        return { success: false, logs: [`🔥 ERR: ${e.message}`], items: [] };
     }
 }
 
-/**
- * SEND NOTIFIKASI
- */
 async function sendSuccessNotification(chatId, orderId, logs = []) {
     try {
         const snap = await db.collection('orders').doc(orderId).get();
-        if(!snap.exists) return;
+        if (!snap.exists) return;
         const data = snap.data();
         
         // Format Nomor HP
@@ -139,10 +173,9 @@ async function sendSuccessNotification(chatId, orderId, logs = []) {
         data.items.forEach(i => {
             msgWA += `📦 *${i.name}* (x${i.qty})\n`;
             if (i.data && i.data.length > 0) {
-                // Tampilkan Data
                 msgWA += `${i.data.join('\n')}\n\n`;
             } else {
-                msgWA += `_Data sedang disiapkan Admin..._\n\n`;
+                msgWA += `_Proses Input Manual..._\n\n`;
                 adaKosong = true;
             }
         });
@@ -150,10 +183,16 @@ async function sendSuccessNotification(chatId, orderId, logs = []) {
 
         const url = (hp.length > 9) ? `https://wa.me/${hp}?text=${encodeURIComponent(msgWA)}` : `https://wa.me/?text=${encodeURIComponent(msgWA)}`;
 
-        // Pesan ke Admin
-        const statusIcon = adaKosong ? "⚠️ PARTIAL/KOSONG" : "✅ LENGKAP";
-        let adminMsg = `<b>DONE (AUTO-PROCESS)</b>\nRef: <code>${orderId}</code>\nStatus: ${statusIcon}\n\n`;
-        if (logs.length > 0) adminMsg += `Log: ${logs.join('\n')}`;
+        // LOGIKA DEBUG DI CHAT ADMIN
+        const statusIcon = adaKosong ? "⚠️ PARTIAL" : "✅ LENGKAP";
+        let adminMsg = `<b>DONE</b>\nRef: <code>${orderId}</code>\nStatus: ${statusIcon}\n\n`;
+        
+        // Tampilkan Log Error Stok secara detail supaya tidak bingung
+        if (logs.length > 0) {
+            // Filter log yang error saja biar gak penuh
+            const errLogs = logs.filter(l => l.includes('❌') || l.includes('⚠️'));
+            if(errLogs.length > 0) adminMsg += `<b>Log Masalah:</b>\n${errLogs.join('\n')}\n`;
+        }
 
         const keyboard = [
             [{ text: "📲 Chat WA User", url: url }],
@@ -165,11 +204,11 @@ async function sendSuccessNotification(chatId, orderId, logs = []) {
 }
 
 async function showManualInputMenu(chatId, orderId, items) {
-    let msg = `🛠 <b>MENU REVISI MANUAL</b>\nRef: ${orderId}\n\nKlik item yang mau diisi/diedit:`;
+    let msg = `🛠 <b>MENU REVISI MANUAL</b>\nRef: ${orderId}\n\nKlik item untuk edit:`;
     const kb = [];
     items.forEach((item, i) => {
         const status = (item.data && item.data.length > 0) ? '✅' : '❌';
-        kb.push([{ text: `${status} ${item.name.slice(0,15)}...`, callback_data: `FILL_${orderId}_${i}` }]);
+        kb.push([{ text: `${status} ${item.name.slice(0,20)}`, callback_data: `FILL_${orderId}_${i}` }]);
     });
     kb.push([{ text: "❌ Tutup Menu", callback_data: `CLOSE_MENU` }]); 
     await sendMessage(chatId, msg, { reply_markup: { inline_keyboard: kb } });
