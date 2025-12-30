@@ -2,6 +2,8 @@ const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
 // Import Otak Utama
 const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
+// Import Helper Realtime Dashboard (Kode Baru)
+const { sendRealtimeDashboard } = require('./adminRealtime');
 
 const ADMIN_CHAT_ID = '1383656187'; // ID Admin Anda
 
@@ -62,6 +64,13 @@ module.exports = async function(req, res) {
                          `🛒 <b>Items:</b>\n${itemsDetail}\n` +
                          `👇 <b>TINDAKAN:</b>\nCek mutasi bank/e-wallet. Jika dana masuk, klik ACC.`;
 
+            // KODE BARU: Gunakan Realtime Dashboard agar admin melihat status pending
+            // Kita modifikasi sedikit logic tombol ACC/REJECT agar masuk ke dashboard
+            // TAPI karena Anda butuh tombol ACC/REJECT spesifik di sini, kita tetap pakai sendMessage biasa
+            // untuk tombol utamanya, lalu kita kirim Dashboard susulan ATAU kita gabungkan.
+            
+            // SOLUSI TERBAIK: Kirim pesan Order Manual seperti biasa (agar tombol ACC ada), 
+            // lalu kirim Dashboard Info di bawahnya.
             await sendMessage(ADMIN_CHAT_ID, text, {
                 reply_markup: {
                     inline_keyboard: [
@@ -70,6 +79,9 @@ module.exports = async function(req, res) {
                     ]
                 }
             });
+
+            // Kirim status dashboard terkini (agar notif "Pending: X" muncul)
+            await sendRealtimeDashboard(ADMIN_CHAT_ID, "🔔 <i>Info Status Antrian:</i>");
         } 
         
         // --- ALUR 1.5: KOMPLAIN / LAPOR MASALAH ---
@@ -88,12 +100,14 @@ module.exports = async function(req, res) {
              await sendMessage(ADMIN_CHAT_ID, text, {
                 reply_markup: {
                     inline_keyboard: [
-                        // PERUBAHAN ADA DISINI: 
                         // Ubah 'REPLY_' menjadi 'REPLY_CS_' agar cocok dengan webhook.js
                         [{ text: "📩 BALAS PESAN PEMBELI", callback_data: `REPLY_CS_${orderId}` }]
                     ]
                 }
              });
+
+             // KODE BARU: Info Dashboard Susulan
+             await sendRealtimeDashboard(ADMIN_CHAT_ID, "ℹ️ <i>Status dashboard saat ini:</i>");
         }
 
         // ALUR 2: PEMBAYARAN OTOMATIS (SALDO / MIDTRANS SETTLEMENT)
@@ -105,8 +119,12 @@ module.exports = async function(req, res) {
             await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "OTOMATIS");
 
             if (!result.success) {
-                // Jika stok kosong, munculkan menu revisi seperti manual
-                await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>STOK PERLU INPUT MANUAL</b>\nOrder ID: <code>${orderId}</code>`);
+                // KODE BARU: Gunakan SendRealtimeDashboard untuk notifikasi stok kosong
+                // Ini menggantikan sendMessage biasa agar tombol "Proses Manual" lebih mencolok
+                const alertMsg = `⚠️ <b>STOK PERLU INPUT MANUAL</b>\nOrder ID: <code>${orderId}</code>\nSebagian/Semua item kosong.`;
+                await sendRealtimeDashboard(ADMIN_CHAT_ID, alertMsg);
+                
+                // Tetap munculkan menu input manual yang detail
                 await showManualInputMenu(ADMIN_CHAT_ID, orderId, result.items);
             }
         }
