@@ -3,8 +3,7 @@ const { sendMessage } = require('./botConfig');
 
 /**
  * 1. PROSES STOK (CORE LOGIC)
- * Perbaikan: Menggunakan sistem Batch Processing untuk mencegah konflik transaksi
- * saat membeli banyak varian dari produk yang sama.
+ * Perbaikan: Mendukung Multi-Item & Deteksi Stok Utama agar data tidak kosong.
  */
 async function processOrderStock(orderId) {
     const orderRef = db.collection('orders').doc(orderId);
@@ -20,9 +19,9 @@ async function processOrderStock(orderId) {
         let logs = [];
         let needManual = false;
 
-        // 2. Kumpulkan ID Produk Unik (Supaya tidak baca DB berkali-kali untuk produk yg sama)
-        const uniqueProductIds = [...new Set(items.map(i => i.isVariant ? i.originalId : i.id))];
-        const productCache = {}; // Penyimpanan sementara data produk
+        // 2. Kumpulkan ID Produk Unik (SOLUSI: Support originalId untuk produk utama)
+        const uniqueProductIds = [...new Set(items.map(i => i.originalId || i.id))];
+        const productCache = {}; 
 
         // 3. Baca Semua Data Produk Sekaligus (READ PHASE)
         for (const pid of uniqueProductIds) {
@@ -38,35 +37,33 @@ async function processOrderStock(orderId) {
             }
         }
 
-        // 4. Proses Item Satu per Satu (LOGIC PHASE)
+        // 4. Proses Item Satu per Satu (SOLUSI: Looping Multi-Item Tanpa Putus)
         for (let i = 0; i < items.length; i++) {
-            // Skip jika item sudah pernah diproses sebelumnya (ada data)
+            // Skip jika item sudah pernah diproses sebelumnya
             if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) continue;
 
             const item = items[i];
-            const pid = item.isVariant ? item.originalId : item.id;
+            const pid = item.originalId || item.id; // KUNCI: Gunakan originalId jika ada
             const productEntry = productCache[pid];
 
             // Cek Ketersediaan Produk Induk
             if (!productEntry) {
-                logs.push(`⚠️ <b>${item.name}</b>: Produk induk tidak ditemukan di Database.`);
+                logs.push(`⚠️ <b>${item.name}</b>: Produk tidak ditemukan di DB.`);
                 needManual = true; continue;
             }
 
             const pData = productEntry.data;
-            
-            // Cek apakah produk ini Manual/API (Langsung skip stok)
             const isParentManual = pData.isManual || pData.processType === 'MANUAL' || pData.processType === 'EXTERNAL_API';
+            
             if (!item.isVariant && isParentManual) {
-                logs.push(`⚠️ <b>${item.name}</b>: Produk tipe Manual/API (Menunggu Admin).`);
+                logs.push(`⚠️ <b>${item.name}</b>: Tipe Manual (Menunggu Admin).`);
                 needManual = true; continue;
             }
 
-            // --- LOGIKA POTONG STOK ---
             let stokDiambil = [];
 
-            if (item.isVariant) {
-                // Cari Index Varian (Case Insensitive & Trimmed)
+            if (item.isVariant && item.variantName) {
+                // --- LOGIKA VARIASI ---
                 const vIdx = pData.variations ? pData.variations.findIndex(v => 
                     v.name.trim().toLowerCase() === item.variantName.trim().toLowerCase()
                 ) : -1;
@@ -74,32 +71,26 @@ async function processOrderStock(orderId) {
                 if (vIdx !== -1) {
                     const stokVarian = pData.variations[vIdx].items || [];
                     if (stokVarian.length >= item.qty) {
-                        // Potong Stok
                         stokDiambil = stokVarian.slice(0, item.qty);
-                        pData.variations[vIdx].items = stokVarian.slice(item.qty); // Update memori lokal
-                        productEntry.modified = true; // Tandai untuk disimpan nanti
+                        pData.variations[vIdx].items = stokVarian.slice(item.qty);
+                        productEntry.modified = true;
                         logs.push(`✅ <b>${item.name}</b>: Stok Varian OK.`);
                     } else {
-                        logs.push(`❌ <b>${item.name}</b>: Stok Varian KURANG (Sisa ${stokVarian.length}).`);
+                        logs.push(`❌ <b>${item.name}</b>: Stok Varian Habis.`);
                         needManual = true;
                     }
-                } else {
-                    logs.push(`❌ <b>${item.name}</b>: Nama Varian tidak cocok/hilang.`);
-                    needManual = true;
                 }
             } else {
-                // --- PERBAIKAN STOK UTAMA DI SINI ---
-                // Mengambil dari pData.items (Array Stok)
+                // --- PERBAIKAN STOK UTAMA (SOLUSI POIN 1) ---
                 const stokUtama = Array.isArray(pData.items) ? pData.items : [];
                 
                 if (stokUtama.length >= item.qty) {
                     stokDiambil = stokUtama.slice(0, item.qty);
-                    pData.items = stokUtama.slice(item.qty); // Update memori
+                    pData.items = stokUtama.slice(item.qty);
                     productEntry.modified = true;
                     logs.push(`✅ <b>${item.name}</b>: Stok Utama OK.`);
                 } else {
-                    // Jika stokUtama kosong, logs akan memberitahu admin
-                    logs.push(`❌ <b>${item.name}</b>: Stok Utama KOSONG/HABIS.`);
+                    logs.push(`❌ <b>${item.name}</b>: Stok Utama Kosong.`);
                     needManual = true;
                 }
             }
@@ -107,28 +98,23 @@ async function processOrderStock(orderId) {
             // Jika stok berhasil diambil, masukkan ke data item order
             if (stokDiambil.length > 0) {
                 items[i].data = stokDiambil; 
-                items[i].sn = stokDiambil; // Kompatibilitas lama
-                // Tambah counter terjual di data produk
+                items[i].sn = stokDiambil; 
                 pData.realSold = (pData.realSold || 0) + item.qty;
                 productEntry.modified = true;
             }
         }
 
         // 5. Simpan Perubahan ke Database (WRITE PHASE)
-        // Update Produk yang stoknya berubah
         for (const pid in productCache) {
             if (productCache[pid].modified) {
                 const entry = productCache[pid];
-                // Kita update field yang relevan saja agar efisien
-                let updatePayload = { realSold: entry.data.realSold };
+                let updatePayload = { realSold: entry.data.realSold || 0 };
                 if (entry.data.variations) updatePayload.variations = entry.data.variations;
                 if (entry.data.items) updatePayload.items = entry.data.items;
-                
                 t.update(entry.ref, updatePayload);
             }
         }
 
-        // Update Status Order & Items yang sudah terisi data
         const finalStatus = needManual ? 'processing' : 'success';
         t.update(orderRef, { items: items, status: finalStatus });
 
@@ -138,7 +124,7 @@ async function processOrderStock(orderId) {
 
 /**
  * 2. KIRIM NOTIFIKASI SUKSES (WA)
- * Perbaikan: Mencari Nomor HP di SEMUA item, bukan cuma item pertama.
+ * SOLUSI: Menampilkan semua item meskipun banyak variasi di keranjang.
  */
 async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
     try {
@@ -146,56 +132,41 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
         if (!snap.exists) return;
         const data = snap.data();
         
-        // --- LOGIKA PENCARIAN NOMOR HP (REVISI) ---
-        let targetPhone = "";
+        let targetPhone = data.phoneNumber || "";
         
-        // Cek 1: Apakah ada field phoneNumber global? (Dari profil user)
-        if (data.phoneNumber) targetPhone = data.phoneNumber;
-
-        // Cek 2: Jika kosong, cari di Note SETIAP ITEM
         if (!targetPhone || targetPhone.length < 5) {
-            // Loop semua item untuk cari yang mirip nomor HP
             for (const item of data.items) {
                 if (item.note) {
-                    // Bersihkan note, ambil angkanya saja
                     let cleanNote = item.note.replace(/\D/g, '');
-                    // Jika panjangnya wajar untuk nomor HP (10-15 digit)
                     if (cleanNote.length >= 10 && cleanNote.length <= 15) {
                         targetPhone = cleanNote;
-                        break; // Ketemu! Berhenti mencari.
+                        break;
                     }
                 }
             }
         }
 
-        // Format ke 62 (Standar WA)
-        targetPhone = targetPhone.replace(/\D/g, ''); // Pastikan cuma angka
+        targetPhone = targetPhone.replace(/\D/g, ''); 
         if (targetPhone.startsWith('0')) targetPhone = '62' + targetPhone.slice(1);
         if (targetPhone.startsWith('8')) targetPhone = '62' + targetPhone;
 
-        // Validasi Akhir
         const validPhone = (targetPhone.length >= 10 && targetPhone.startsWith('62'));
-        const waUrl = validPhone 
-            ? `https://wa.me/${targetPhone}` 
-            : `https://wa.me/`; // Jika invalid, buka WA picker
+        const waUrl = validPhone ? `https://wa.me/${targetPhone}` : `https://wa.me/`;
 
-        // Susun Pesan
         let msg = `Halo, Pesanan *${orderId}* Sukses!\n\n`;
+        // SOLUSI POIN 2: Loop semua item untuk notifikasi bot
         data.items.forEach(i => {
             msg += `📦 *${i.name}*\n`;
             if(i.data && Array.isArray(i.data) && i.data.length > 0) {
-                // Tampilkan kode/data stok
-                msg += `${i.data.join('\n')}\n\n`;
+                msg += `<code>${i.data.join('\n')}</code>\n\n`;
             } else if (i.note) {
-                // Jika manual/proses, tampilkan catatan user
-                msg += `_Note: ${i.note}_\nStatus: Menunggu Proses/Terkirim\n\n`;
+                msg += `_Note: ${i.note}_\nStatus: Diproses\n\n`;
             } else {
                 msg += `-\n\n`;
             }
         });
         msg += `Terima Kasih!`;
         
-        // Encode pesan untuk URL
         const finalUrl = `${waUrl}?text=${encodeURIComponent(msg)}`;
 
         const keyboard = [
