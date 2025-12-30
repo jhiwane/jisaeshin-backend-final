@@ -111,7 +111,99 @@ async function processOrderStock(orderId) {
                 let updatePayload = { realSold: entry.data.realSold || 0 };
                 if (entry.data.variations) updatePayload.variations = entry.data.variations;
                 if (entry.data.items) updatePayload.items = entry.data.items;
-                t.update(entry.ref, updatePayload);
+async function processOrderStock(orderId) {
+    const orderRef = db.collection('orders').doc(orderId);
+    
+    return await db.runTransaction(async (t) => {
+        const orderDoc = await t.get(orderRef);
+        if (!orderDoc.exists) throw new Error("Order tidak ditemukan.");
+        
+        const orderData = orderDoc.data();
+        let items = JSON.parse(JSON.stringify(orderData.items)); 
+        let logs = [];
+        let needManual = false;
+
+        const uniqueProductIds = [...new Set(items.map(i => i.originalId || i.id))];
+        const productCache = {}; 
+
+        for (const pid of uniqueProductIds) {
+            if (!pid) continue;
+            const pDoc = await t.get(db.collection('products').doc(pid));
+            if (pDoc.exists) {
+                productCache[pid] = { ref: pDoc.ref, data: pDoc.data(), modified: false };
+            }
+        }
+
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) continue;
+
+            const item = items[i];
+            const pid = item.originalId || item.id;
+            const productEntry = productCache[pid];
+
+            if (!productEntry) {
+                logs.push(`⚠️ <b>${item.name}</b>: Produk tidak ditemukan.`);
+                needManual = true; continue;
+            }
+
+            const pData = productEntry.data;
+            let stokDiambil = [];
+
+            // 1. CEK JIKA INI VARIASI
+            if (item.isVariant && item.variantName) {
+                const vIdx = pData.variations ? pData.variations.findIndex(v => 
+                    v.name.trim().toLowerCase() === item.variantName.trim().toLowerCase()
+                ) : -1;
+
+                if (vIdx !== -1) {
+                    const stokVarian = Array.isArray(pData.variations[vIdx].items) ? pData.variations[vIdx].items : [];
+                    if (stokVarian.length >= item.qty) {
+                        stokDiambil = stokVarian.slice(0, item.qty);
+                        pData.variations[vIdx].items = stokVarian.slice(item.qty);
+                        productEntry.modified = true;
+                    }
+                }
+            } 
+            // 2. CEK JIKA INI PRODUK UTAMA (PERBAIKAN KRITIS DI SINI)
+            else {
+                // Pastikan mengambil dari pData.items (BUKAN item.items)
+                // Dan pastikan pData.items adalah Array
+                let stokUtama = [];
+                if (pData.items && Array.isArray(pData.items)) {
+                    stokUtama = pData.items;
+                } else if (typeof pData.items === 'string' && pData.items.trim() !== "") {
+                    // Jaga-jaga jika admin simpan sebagai string bukan array
+                    stokUtama = pData.items.split('\n').filter(x => x.trim());
+                }
+
+                if (stokUtama.length >= (item.qty || 1)) {
+                    stokDiambil = stokUtama.slice(0, item.qty || 1);
+                    pData.items = stokUtama.slice(item.qty || 1); // Potong stok
+                    productEntry.modified = true;
+                    logs.push(`✅ <b>${item.name}</b>: Stok Utama Berhasil ditarik.`);
+                } else {
+                    logs.push(`❌ <b>${item.name}</b>: Stok Utama Kosong/Kurang.`);
+                    needManual = true;
+                }
+            }
+
+            if (stokDiambil.length > 0) {
+                items[i].data = stokDiambil; 
+                items[i].sn = stokDiambil; 
+                pData.realSold = (pData.realSold || 0) + (item.qty || 1);
+                productEntry.modified = true;
+            }
+        }
+
+        // Simpan perubahan ke database
+        for (const pid in productCache) {
+            if (productCache[pid].modified) {
+                const entry = productCache[pid];
+                t.update(entry.ref, {
+                    items: entry.data.items || [],
+                    variations: entry.data.variations || [],
+                    realSold: entry.data.realSold || 0
+                });
             }
         }
 
