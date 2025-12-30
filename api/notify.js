@@ -71,6 +71,24 @@ module.exports = async function(req, res) {
                 }
             });
         } 
+        
+        // --- [BARU] ALUR 1.5: KOMPLAIN / LAPOR MASALAH ---
+        // Ini menangani request dari tombol "KOMPLAIN" yang baru kita perbaiki di frontend
+        else if (type === 'complaint') {
+             const complaintMsg = (payload.message || "Tidak ada pesan").replace(/&/g, '&amp;').replace(/</g, '&lt;');
+             const senderName = (payload.buyerContact || "Guest").replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+             const text = `⚠️ <b>LAPORAN KOMPLAIN BARU</b>\n\n` +
+                          `🆔 Order ID: <code>${orderId}</code>\n` +
+                          `👤 Pelapor: <b>${senderName}</b>\n\n` +
+                          `💬 <b>Pesan Masalah:</b>\n<pre>${complaintMsg}</pre>\n\n` +
+                          `🛒 <b>Barang Terkait:</b>\n${itemsDetail}\n` +
+                          `💡 <i>Segera cek panel admin untuk membalas.</i>`;
+            
+             // Kirim ke Admin tanpa tombol aksi (karena balas lewat web)
+             await sendMessage(ADMIN_CHAT_ID, text);
+        }
+
         // ALUR 2: PEMBAYARAN OTOMATIS (SALDO / MIDTRANS SETTLEMENT)
         else if (statusMidtrans === 'settlement' || statusMidtrans === 'capture' || type === 'otomatis') {
             
