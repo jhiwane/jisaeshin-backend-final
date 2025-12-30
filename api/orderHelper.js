@@ -1,10 +1,6 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
 
-/**
- * 1. PROSES STOK (CORE LOGIC)
- * Perbaikan: Mendukung Multi-Item & Deteksi Stok Utama agar data tidak kosong.
- */
 async function processOrderStock(orderId) {
     const orderRef = db.collection('orders').doc(orderId);
     
