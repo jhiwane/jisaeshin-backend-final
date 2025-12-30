@@ -1,7 +1,6 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
 const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
-// UPDATE IMPORT: Menambahkan handleDailyReport & handleLowStockCheck
 const { showAdminDashboard, handleDailyReport, handleLowStockCheck } = require('./adminCommands');
 const fetch = require('node-fetch');
 
@@ -34,7 +33,7 @@ module.exports = async function(req, res) {
             else if (data === 'ADMIN_REPORT') await handleDailyReport(chatId);
             else if (data === 'ADMIN_STOCK') await handleLowStockCheck(chatId);
 
-            // === B. FITUR BARU: CEK ORDER PENDING (MACET) ===
+            // === B. CEK ORDER PENDING (MACET) ===
             else if (data === 'CHECK_PENDING') {
                 const snapshot = await db.collection('orders')
                     .where('status', '==', 'manual_verification')
@@ -60,7 +59,7 @@ module.exports = async function(req, res) {
                 await deleteMessage(chatId, messageId);
             }
 
-            // === C. FITUR BARU: RESOLVE (LOOP INPUT ITEM) ===
+            // === C. FITUR BARU: RESOLVE (INPUT SISA ITEM) ===
             else if (data.startsWith('RESOLVE_')) {
                 const orderId = data.replace('RESOLVE_', '');
                 const orderDoc = await db.collection('orders').doc(orderId).get();
@@ -74,6 +73,7 @@ module.exports = async function(req, res) {
                     // Cari item PERTAMA yang datanya masih kosong
                     let missingItemIndex = -1;
                     for (let i = 0; i < items.length; i++) {
+                        // Cek jika data kosong atau tidak ada
                         if (!items[i].data || items[i].data.length === 0) {
                             missingItemIndex = i;
                             break;
@@ -81,48 +81,68 @@ module.exports = async function(req, res) {
                     }
 
                     if (missingItemIndex !== -1) {
-                        // Jika ada yang kosong, minta admin input
-                        const itemName = items[missingItemIndex].name || "Item Tanpa Nama";
+                        // --- INI PERBAIKANNYA: Tampilkan Detail QTY ---
+                        const item = items[missingItemIndex];
+                        const productName = item.name || "Produk Tanpa Nama";
+                        const variantName = item.variation_name || item.variant || "-";
+                        const qtyNeeded = item.qty || 1; // Ambil jumlah QTY yang harus diisi
+
                         await sendMessage(chatId, 
-                            `🛠 <b>MANUAL INPUT (PENDING)</b>\n` +
-                            `Order ID: <code>${orderId}</code>\n` +
-                            `Item ke-${missingItemIndex + 1}: <b>${itemName}</b>\n\n` +
-                            `⚠️ Stok kosong/kurang. Silakan kirim data (akun/voucher) untuk item ini sekarang.`, 
+                            `📝 <b>INPUT DATA MANUAL (PENDING)</b>\n` +
+                            `Order ID: <code>${orderId}</code>\n\n` +
+                            `📦 <b>Produk:</b> ${productName}\n` +
+                            `🏷 <b>Variasi:</b> ${variantName}\n` +
+                            `🔢 <b>Jumlah (Qty):</b> ${qtyNeeded} pcs\n\n` +
+                            `⚠️ <i>Stok habis. Silakan kirim ${qtyNeeded} baris data (akun/voucher) sekarang.</i>`, 
                             { reply_markup: { force_reply: true } }
                         );
 
-                        // Simpan Context: RESOLVING_PENDING_ORDER
+                        // Simpan Context
                         await db.collection('admin_context').doc(chatId.toString()).set({
                             action: 'RESOLVING_PENDING_ORDER',
                             orderId: orderId,
                             itemIdx: missingItemIndex
                         });
                     } else {
-                        // Jika SEMUA item sudah terisi, Finalisasi ke SUCCESS
+                        // Jika SEMUA item ternyata sudah terisi penuh
                         await db.collection('orders').doc(orderId).update({ status: 'success' });
                         await sendSuccessNotification(chatId, orderId, "MANUAL RESOLVED");
-                        await sendMessage(chatId, "✅ <b>BERES!</b> Semua item terisi. Status diubah ke Success.");
+                        await sendMessage(chatId, "✅ <b>BERES!</b> Semua item sudah terisi penuh.");
                         await deleteMessage(chatId, messageId);
                     }
                 }
             }
 
-            // === D. FITUR LAMA (ACC, REJECT, DLL) ===
+            // === D. LOGIKA ACC (AUTO PROCESS + PARSIAL) ===
             else if (data.startsWith('ACC_')) {
                 const orderId = data.replace('ACC_', ''); 
                 await deleteMessage(chatId, messageId); 
+                
+                // 1. Jalankan proses stok otomatis (Potong yang ada dulu)
                 const result = await processOrderStock(orderId);
 
-                // Jika sukses auto-process
+                // Jika sukses SEMUA
                 if (result.success) {
                     await sendSuccessNotification(chatId, orderId, "ACC ADMIN");
                 } 
-                // Jika gagal (stok kurang), lempar ke manual verification (PENDING)
+                // Jika GAGAL atau HANYA SEBAGIAN
                 else {
+                    // Update status jadi manual_verification (Pending)
                     await db.collection('orders').doc(orderId).update({ status: 'manual_verification' });
-                    await sendMessage(chatId, "⚠️ <b>Stok Otomatis Gagal.</b> Order masuk ke daftar PENDING.\nKlik tombol di bawah untuk input manual bertahap.", {
-                        reply_markup: { inline_keyboard: [[{ text: "🛠 Proses Manual Sekarang", callback_data: `RESOLVE_${orderId}` }]] }
-                    });
+                    
+                    // Hitung berapa item yang berhasil terisi
+                    const filledCount = result.items.filter(i => i.data && i.data.length > 0).length;
+                    const totalCount = result.items.length;
+
+                    await sendMessage(chatId, 
+                        `⚠️ <b>PROSES PARSIAL</b>\nOrder: <code>${orderId}</code>\n\n` +
+                        `✅ Terkirim Otomatis: <b>${filledCount} Item</b>\n` +
+                        `❌ Stok Kosong: <b>${totalCount - filledCount} Item</b>\n\n` +
+                        `Item yang ada stoknya sudah masuk ke data user. Silakan input manual sisanya.`, 
+                        {
+                            reply_markup: { inline_keyboard: [[{ text: "🛠 Input Sisa Item", callback_data: `RESOLVE_${orderId}` }]] }
+                        }
+                    );
                 }
             }
             
@@ -177,7 +197,6 @@ module.exports = async function(req, res) {
             const chatId = update.message.chat.id;
             const text = update.message.text;
             
-            // Cek Context Admin
             const contextSnap = await db.collection('admin_context').doc(chatId.toString()).get();
             
             if (contextSnap.exists) {
@@ -228,7 +247,7 @@ module.exports = async function(req, res) {
                         // Cek apakah masih ada item lain yang kosong?
                         let nextMissingIndex = -1;
                         for (let i = 0; i < items.length; i++) {
-                            if (i == itemIdx) continue; // Skip item ini (krn baru diisi)
+                            if (i == itemIdx) continue; // Skip item ini
                             if (!items[i].data || items[i].data.length === 0) {
                                 nextMissingIndex = i;
                                 break;
