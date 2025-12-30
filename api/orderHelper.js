@@ -122,7 +122,7 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
         // Header sesuai permintaan kamu
         let msg = `✅ <b>ORDER SELESAI (${type})</b>\n`;
         msg += `ID: <code>${orderId}</code>\n`;
-        msg += `Status: Success\n`;
+        msg += `Status: Success\n\n`;
 
         // Loop Item dengan penomoran
         if (data.items && Array.isArray(data.items)) {
@@ -130,9 +130,18 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
                 // Format: item 1 :name qty: 100
                 msg += `item ${index + 1} :${item.name}  qty: ${item.qty || 1}\n`;
                 
-                // Jika ada data konten (stok), tampilkan di bawahnya
+                // --- LOGIKA ANTI-LIMIT & ANTI-DELAY ---
                 if (item.data && Array.isArray(item.data) && item.data.length > 0) {
-                    msg += `<code>${item.data.join('\n')}</code>\n`;
+                    // Hanya tampilkan 3 data pertama di bot sebagai sampel
+                    const sampleData = item.data.slice(0, 3); 
+                    msg += `<code>${sampleData.join('\n')}</code>\n`;
+                    
+                    // Jika data lebih dari 3, beri info tambahan
+                    if (item.data.length > 3) {
+                        msg += `<i>(+ ${item.data.length - 3} data lainnya tersedia di Web)</i>\n`;
+                    }
+                } else {
+                    msg += `<i>(Menunggu data/Manual)</i>\n`;
                 }
                 msg += `\n`; // Spasi antar produk
             });
@@ -144,6 +153,7 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
         let targetPhone = data.phoneNumber || "";
         targetPhone = targetPhone.replace(/\D/g, ''); 
         if (targetPhone.startsWith('0')) targetPhone = '62' + targetPhone.slice(1);
+        if (targetPhone.startsWith('8')) targetPhone = '62' + targetPhone;
         
         const keyboard = [
             [{ text: "📲 Chat WA User", url: `https://wa.me/${targetPhone}` }],
