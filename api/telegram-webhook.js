@@ -34,65 +34,68 @@ module.exports = async function(req, res) {
                 const orderId = data.replace('ACC_', ''); 
                 await deleteMessage(chatId, messageId); // Hapus tombol ACC
 
-                // Proses Stok (Akan selalu return success di DB)
+                // --- PERBAIKAN LOGIKA DISINI ---
+                // Jalankan proses pengurangan stok di database
                 const result = await processOrderStock(orderId);
 
-                // Langsung lapor ke Admin (Logika Anti-Bengong)
-                // Jika kosong, admin akan lihat tombol "REVISI" di pesan ini
-                await sendSuccessNotification(chatId, orderId, result.logs);
-            }
+                // Kirim Notifikasi Sukses TERLEBIH DAHULU (Agar data produk utama muncul otomatis)
+                await sendSuccessNotification(chatId, orderId, "ACC ADMIN");
 
+                // Jika ada item yang masih kosong (perlu manual), tampilkan menunya
+                if (!result.success) {
+                    await sendMessage(chatId, "⚠️ <b>Beberapa item memerlukan input manual:</b>");
+                    await showManualInputMenu(chatId, orderId, result.items);
+                }
+            }
+            
             else if (data.startsWith('REJECT_')) {
                 const orderId = data.replace('REJECT_', '');
                 await db.collection('orders').doc(orderId).update({ status: 'failed' });
                 await deleteMessage(chatId, messageId);
-                await sendMessage(chatId, `⛔️ Order <b>${orderId}</b> DITOLAK.`);
+                await sendMessage(chatId, `❌ Order <code>${orderId}</code> telah DITOLAK.`);
             }
 
-            // MENU REVISI
             else if (data.startsWith('REVISI_')) {
                 const orderId = data.replace('REVISI_', '');
                 const snap = await db.collection('orders').doc(orderId).get();
-                if (snap.exists) await showManualInputMenu(chatId, orderId, snap.data().items);
+                if(snap.exists) await showManualInputMenu(chatId, orderId, snap.data().items);
             }
 
-            // TOMBOL ISI PER ITEM (FILL)
             else if (data.startsWith('FILL_')) {
-                const parts = data.split('_'); // FILL_ORDERID_INDEX
+                const parts = data.split('_');
                 const orderId = parts[1];
                 const itemIdx = parts[2];
-                
-                // Minta Input Manual
-                const prompt = `✍️ <b>INPUT DATA MANUAL</b>\n\nSilakan Reply pesan ini dengan Data Akun / Voucher.\n(Bisa multi-baris untuk banyak akun)\n\nRefID: ${orderId}\nIdx: ${itemIdx}`;
-                
-                await sendMessage(chatId, prompt, { reply_markup: { force_reply: true } });
+                // Simpan state user sedang input manual ke database/cache jika perlu
+                await sendMessage(chatId, `📝 <b>INPUT DATA</b>\nSilakan kirim data untuk item ke-${parseInt(itemIdx)+1}.\n\n<i>Gunakan Enter untuk banyak baris.</i>\n\nContoh:\n<code>email:pass\nemail:pass</code>`, {
+                    reply_markup: { force_reply: true }
+                });
+                // Simpan context admin untuk ReplyHandler (Bisa pakai metadata database)
+                await db.collection('admin_context').doc(chatId.toString()).set({
+                    action: 'WAITING_MANUAL_INPUT',
+                    orderId: orderId,
+                    itemIdx: itemIdx
+                });
             }
 
-            else if (data === 'CLOSE_MENU') {
+            else if (data.startsWith('DONE_')) {
+                const orderId = data.replace('DONE_', '');
+                await sendSuccessNotification(chatId, orderId, "MANUAL ADMIN");
                 await deleteMessage(chatId, messageId);
             }
+        } 
 
-            return res.status(200).send('ok');
-        }
-
-        // --- LOGIKA REPLY (INPUT REVISI SUPAYA MUNCUL DI WEB) ---
-        if (update.message && update.message.reply_to_message) {
-            const text = update.message.text || "";
+        // 2. LOGIKA REPLIES (UNTUK INPUT MANUAL)
+        else if (update.message && update.message.reply_to_message) {
             const chatId = update.message.chat.id;
-            const replyOrigin = update.message.reply_to_message.text || "";
-
-            // Pastikan ini adalah balasan untuk Input Manual
-            if (replyOrigin.includes('RefID:')) {
-                const idMatch = replyOrigin.match(/RefID:\s*([A-Za-z0-9-]+)/);
-                const idxMatch = replyOrigin.match(/Idx:\s*(\d+)/);
-                
-                if (idMatch && idxMatch) {
-                    const orderId = idMatch[1];
-                    const itemIdx = parseInt(idxMatch[1]); // Ambil Index Item
+            const text = update.message.text;
+            
+            const contextSnap = await db.collection('admin_context').doc(chatId.toString()).get();
+            if (contextSnap.exists) {
+                const context = contextSnap.data();
+                if (context.action === 'WAITING_MANUAL_INPUT') {
+                    const { orderId, itemIdx } = context;
+                    const dataArray = text.split('\n').map(x => x.trim()).filter(x => x);
                     
-                    // Split text kalau ada banyak baris (untuk multi qty)
-                    const dataArray = text.split('\n').filter(x => x.trim().length > 0);
-
                     await db.runTransaction(async (t) => {
                         const ref = db.collection('orders').doc(orderId);
                         const doc = await t.get(ref);
@@ -100,26 +103,22 @@ module.exports = async function(req, res) {
                         
                         const items = doc.data().items;
                         
-                        // PASTIKAN UPDATE SEMUA FIELD PENTING
                         if(items[itemIdx]) {
-                            items[itemIdx].data = dataArray; // Array murni
-                            items[itemIdx].sn = dataArray;   // Duplicate ke SN
-                            items[itemIdx].desc = dataArray.join('\n'); // Join jadi string (fallback frontend lama)
+                            items[itemIdx].data = dataArray; 
+                            items[itemIdx].sn = dataArray;   
+                            items[itemIdx].desc = dataArray.join('\n');
                             items[itemIdx].manualInputTime = new Date().toISOString();
                         }
                         
-                        // FORCE UPDATE KE DATABASE
                         t.update(ref, { 
                             items: items, 
-                            status: 'success' // Pastikan status success agar tampil di web
+                            status: 'success' 
                         });
                     });
 
-                    // Konfirmasi ke Admin
                     await sendMessage(chatId, `✅ <b>DATA TERSIMPAN!</b>\nSilakan cek Web user.`);
-                    
-                    // Opsional: Kirim ulang notif sukses agar link WA terupdate dengan data baru
-                    await sendSuccessNotification(chatId, orderId, ["Data Manual Updated"]);
+                    await sendSuccessNotification(chatId, orderId, "Data Manual Updated");
+                    await db.collection('admin_context').doc(chatId.toString()).delete();
                 }
             }
         }
