@@ -131,29 +131,39 @@ module.exports = async function(req, res) {
                 // KASUS 2: ADMIN MENGIRIM BALASAN KOMPLAIN (CS)
                 // ============================================================
                 else if (context.action === 'WAITING_COMPLAINT_REPLY') {
-                    const { ticketId } = context;
+                    const { ticketId } = context; // Ini sebenarnya adalah orderId
 
-                    // A. Update status komplain di database
-                    await db.collection('complaints').doc(ticketId).update({
-                        adminReply: text,       // Isi pesan admin
-                        status: 'replied',      // Ubah status
-                        replyTime: new Date().toISOString(),
-                        isRead: false
-                    });
-
-                    // B. (Opsional) Kirim Notifikasi ke PEMBELI (User Bot)
-                    // Ambil ID Telegram pembeli dari dokumen komplain
                     try {
-                        const ticketDoc = await db.collection('complaints').doc(ticketId).get();
-                        if (ticketDoc.exists) {
-                            const buyerData = ticketDoc.data();
-                            if (buyerData.telegramId) {
-                                await sendMessage(buyerData.telegramId, `🔔 <b>Admin Membalas Komplain Anda:</b>\n\n"${text}"\n\n<i>Silakan cek riwayat komplain.</i>`);
-                            }
+                        // 1. Cek dulu apakah Order ada
+                        const orderRef = db.collection('orders').doc(ticketId);
+                        const orderSnap = await orderRef.get();
+
+                        if (!orderSnap.exists) {
+                            await sendMessage(chatId, `❌ <b>ERROR:</b> Data Order ID <code>${ticketId}</code> tidak ditemukan di database.`);
+                            await db.collection('admin_context').doc(chatId.toString()).delete();
+                            return;
                         }
+
+                        // 2. Update Data di Collection 'orders'
+                        // Kita simpan balasan di field 'complaintReply' agar muncul di Web
+                        await orderRef.update({
+                            complaintReply: text,           // Isi balasan admin
+                            complaintStatus: 'replied',     // Status komplain selesai/dibalas
+                            complaintReplyTime: new Date().toISOString(),
+                            hasNewReply: true               // Flag untuk frontend (opsional)
+                        });
+
+                        // 3. Konfirmasi Sukses ke Admin
+                        await sendMessage(chatId, `✅ <b>Balasan Terkirim!</b>\n\nUntuk Order ID: <code>${ticketId}</code>\nIsi: "${text}"\n\n<i>Silakan cek di Website/Aplikasi User.</i>`);
+                        
+                        // 4. Hapus Context (Reset status admin)
+                        await db.collection('admin_context').doc(chatId.toString()).delete();
+
                     } catch (err) {
-                        console.log("Gagal kirim ke user:", err);
+                        console.error("Error Reply Complaint:", err);
+                        await sendMessage(chatId, `❌ <b>GAGAL MENYIMPAN:</b>\n${err.message}`);
                     }
+                
 
                     // C. Konfirmasi ke Admin & Hapus Context
                     await sendMessage(chatId, `✅ <b>Balasan Terkirim ke User!</b>\nTiket <code>${ticketId}</code> telah ditutup.`);
