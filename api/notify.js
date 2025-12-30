@@ -72,8 +72,7 @@ module.exports = async function(req, res) {
             });
         } 
         
-        // --- [BARU] ALUR 1.5: KOMPLAIN / LAPOR MASALAH ---
-        // Ini menangani request dari tombol "KOMPLAIN" yang baru kita perbaiki di frontend
+        // --- ALUR 1.5: KOMPLAIN / LAPOR MASALAH ---
         else if (type === 'complaint') {
              const complaintMsg = (payload.message || "Tidak ada pesan").replace(/&/g, '&amp;').replace(/</g, '&lt;');
              const senderName = (payload.buyerContact || "Guest").replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -83,10 +82,17 @@ module.exports = async function(req, res) {
                           `👤 Pelapor: <b>${senderName}</b>\n\n` +
                           `💬 <b>Pesan Masalah:</b>\n<pre>${complaintMsg}</pre>\n\n` +
                           `🛒 <b>Barang Terkait:</b>\n${itemsDetail}\n` +
-                          `💡 <i>Segera cek panel admin untuk membalas.</i>`;
+                          `💡 <i>Klik tombol di bawah untuk membalas pesan user ini.</i>`;
             
-             // Kirim ke Admin tanpa tombol aksi (karena balas lewat web)
-             await sendMessage(ADMIN_CHAT_ID, text);
+             // PENAMBAHAN TOMBOL REPLY DISINI
+             await sendMessage(ADMIN_CHAT_ID, text, {
+                reply_markup: {
+                    inline_keyboard: [
+                        // Tombol ini akan mengirim sinyal "REPLY_TRX-..." ke bot utama
+                        [{ text: "📩 BALAS PESAN PEMBELI", callback_data: `REPLY_${orderId}` }]
+                    ]
+                }
+             });
         }
 
         // ALUR 2: PEMBAYARAN OTOMATIS (SALDO / MIDTRANS SETTLEMENT)
