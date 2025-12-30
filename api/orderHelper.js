@@ -1,6 +1,9 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
 
+/**
+ * 1. PROSES STOK (CORE LOGIC)
+ */
 async function processOrderStock(orderId) {
     const orderRef = db.collection('orders').doc(orderId);
     
@@ -10,16 +13,15 @@ async function processOrderStock(orderId) {
         if (!orderDoc.exists) throw new Error("Order tidak ditemukan di Database.");
         
         const orderData = orderDoc.data();
-        // Clone items agar tidak merusak referensi asli saat manipulasi
         let items = JSON.parse(JSON.stringify(orderData.items)); 
         let logs = [];
         let needManual = false;
 
-        // 2. Kumpulkan ID Produk Unik (SOLUSI: Support originalId untuk produk utama)
+        // 2. Kumpulkan ID Produk Unik
         const uniqueProductIds = [...new Set(items.map(i => i.originalId || i.id))];
         const productCache = {}; 
 
-        // 3. Baca Semua Data Produk Sekaligus (READ PHASE)
+        // 3. Baca Semua Data Produk
         for (const pid of uniqueProductIds) {
             if (!pid) continue;
             const pRef = db.collection('products').doc(pid);
@@ -33,103 +35,7 @@ async function processOrderStock(orderId) {
             }
         }
 
-        // 4. Proses Item Satu per Satu (SOLUSI: Looping Multi-Item Tanpa Putus)
-        for (let i = 0; i < items.length; i++) {
-            // Skip jika item sudah pernah diproses sebelumnya
-            if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) continue;
-
-            const item = items[i];
-            const pid = item.originalId || item.id; // KUNCI: Gunakan originalId jika ada
-            const productEntry = productCache[pid];
-
-            // Cek Ketersediaan Produk Induk
-            if (!productEntry) {
-                logs.push(`⚠️ <b>${item.name}</b>: Produk tidak ditemukan di DB.`);
-                needManual = true; continue;
-            }
-
-            const pData = productEntry.data;
-            const isParentManual = pData.isManual || pData.processType === 'MANUAL' || pData.processType === 'EXTERNAL_API';
-            
-            if (!item.isVariant && isParentManual) {
-                logs.push(`⚠️ <b>${item.name}</b>: Tipe Manual (Menunggu Admin).`);
-                needManual = true; continue;
-            }
-
-            let stokDiambil = [];
-
-            if (item.isVariant && item.variantName) {
-                // --- LOGIKA VARIASI ---
-                const vIdx = pData.variations ? pData.variations.findIndex(v => 
-                    v.name.trim().toLowerCase() === item.variantName.trim().toLowerCase()
-                ) : -1;
-
-                if (vIdx !== -1) {
-                    const stokVarian = pData.variations[vIdx].items || [];
-                    if (stokVarian.length >= item.qty) {
-                        stokDiambil = stokVarian.slice(0, item.qty);
-                        pData.variations[vIdx].items = stokVarian.slice(item.qty);
-                        productEntry.modified = true;
-                        logs.push(`✅ <b>${item.name}</b>: Stok Varian OK.`);
-                    } else {
-                        logs.push(`❌ <b>${item.name}</b>: Stok Varian Habis.`);
-                        needManual = true;
-                    }
-                }
-            } else {
-                // --- PERBAIKAN STOK UTAMA (SOLUSI POIN 1) ---
-                const stokUtama = Array.isArray(pData.items) ? pData.items : [];
-                
-                if (stokUtama.length >= item.qty) {
-                    stokDiambil = stokUtama.slice(0, item.qty);
-                    pData.items = stokUtama.slice(item.qty);
-                    productEntry.modified = true;
-                    logs.push(`✅ <b>${item.name}</b>: Stok Utama OK.`);
-                } else {
-                    logs.push(`❌ <b>${item.name}</b>: Stok Utama Kosong.`);
-                    needManual = true;
-                }
-            }
-
-            // Jika stok berhasil diambil, masukkan ke data item order
-            if (stokDiambil.length > 0) {
-                items[i].data = stokDiambil; 
-                items[i].sn = stokDiambil; 
-                pData.realSold = (pData.realSold || 0) + item.qty;
-                productEntry.modified = true;
-            }
-        }
-
-        // 5. Simpan Perubahan ke Database (WRITE PHASE)
-        for (const pid in productCache) {
-            if (productCache[pid].modified) {
-                const entry = productCache[pid];
-                let updatePayload = { realSold: entry.data.realSold || 0 };
-                if (entry.data.variations) updatePayload.variations = entry.data.variations;
-                if (entry.data.items) updatePayload.items = entry.data.items;
-async function processOrderStock(orderId) {
-    const orderRef = db.collection('orders').doc(orderId);
-    
-    return await db.runTransaction(async (t) => {
-        const orderDoc = await t.get(orderRef);
-        if (!orderDoc.exists) throw new Error("Order tidak ditemukan.");
-        
-        const orderData = orderDoc.data();
-        let items = JSON.parse(JSON.stringify(orderData.items)); 
-        let logs = [];
-        let needManual = false;
-
-        const uniqueProductIds = [...new Set(items.map(i => i.originalId || i.id))];
-        const productCache = {}; 
-
-        for (const pid of uniqueProductIds) {
-            if (!pid) continue;
-            const pDoc = await t.get(db.collection('products').doc(pid));
-            if (pDoc.exists) {
-                productCache[pid] = { ref: pDoc.ref, data: pDoc.data(), modified: false };
-            }
-        }
-
+        // 4. Proses Item Satu per Satu
         for (let i = 0; i < items.length; i++) {
             if (items[i].data && Array.isArray(items[i].data) && items[i].data.length > 0) continue;
 
@@ -145,7 +51,7 @@ async function processOrderStock(orderId) {
             const pData = productEntry.data;
             let stokDiambil = [];
 
-            // 1. CEK JIKA INI VARIASI
+            // A. LOGIKA VARIASI
             if (item.isVariant && item.variantName) {
                 const vIdx = pData.variations ? pData.variations.findIndex(v => 
                     v.name.trim().toLowerCase() === item.variantName.trim().toLowerCase()
@@ -160,26 +66,19 @@ async function processOrderStock(orderId) {
                     }
                 }
             } 
-            // 2. CEK JIKA INI PRODUK UTAMA (PERBAIKAN KRITIS DI SINI)
+            // B. LOGIKA PRODUK UTAMA (PERBAIKAN DISINI)
             else {
-                // Pastikan mengambil dari pData.items (BUKAN item.items)
-                // Dan pastikan pData.items adalah Array
                 let stokUtama = [];
-                if (pData.items && Array.isArray(pData.items)) {
+                if (Array.isArray(pData.items)) {
                     stokUtama = pData.items;
                 } else if (typeof pData.items === 'string' && pData.items.trim() !== "") {
-                    // Jaga-jaga jika admin simpan sebagai string bukan array
                     stokUtama = pData.items.split('\n').filter(x => x.trim());
                 }
 
                 if (stokUtama.length >= (item.qty || 1)) {
                     stokDiambil = stokUtama.slice(0, item.qty || 1);
-                    pData.items = stokUtama.slice(item.qty || 1); // Potong stok
+                    pData.items = stokUtama.slice(item.qty || 1);
                     productEntry.modified = true;
-                    logs.push(`✅ <b>${item.name}</b>: Stok Utama Berhasil ditarik.`);
-                } else {
-                    logs.push(`❌ <b>${item.name}</b>: Stok Utama Kosong/Kurang.`);
-                    needManual = true;
                 }
             }
 
@@ -188,10 +87,14 @@ async function processOrderStock(orderId) {
                 items[i].sn = stokDiambil; 
                 pData.realSold = (pData.realSold || 0) + (item.qty || 1);
                 productEntry.modified = true;
+                logs.push(`✅ <b>${item.name}</b>: Berhasil.`);
+            } else {
+                logs.push(`❌ <b>${item.name}</b>: Stok Kosong.`);
+                needManual = true;
             }
         }
 
-        // Simpan perubahan ke database
+        // 5. Simpan Perubahan
         for (const pid in productCache) {
             if (productCache[pid].modified) {
                 const entry = productCache[pid];
@@ -211,8 +114,7 @@ async function processOrderStock(orderId) {
 }
 
 /**
- * 2. KIRIM NOTIFIKASI SUKSES (WA)
- * SOLUSI: Menampilkan semua item meskipun banyak variasi di keranjang.
+ * 2. KIRIM NOTIFIKASI SUKSES
  */
 async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
     try {
@@ -223,7 +125,7 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
         let targetPhone = data.phoneNumber || "";
         
         if (!targetPhone || targetPhone.length < 5) {
-            for (const item of data.items) {
+            for (const item of (data.items || [])) {
                 if (item.note) {
                     let cleanNote = item.note.replace(/\D/g, '');
                     if (cleanNote.length >= 10 && cleanNote.length <= 15) {
@@ -242,7 +144,6 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
         const waUrl = validPhone ? `https://wa.me/${targetPhone}` : `https://wa.me/`;
 
         let msg = `Halo, Pesanan *${orderId}* Sukses!\n\n`;
-        // SOLUSI POIN 2: Loop semua item untuk notifikasi bot
         data.items.forEach(i => {
             msg += `📦 *${i.name}*\n`;
             if(i.data && Array.isArray(i.data) && i.data.length > 0) {
@@ -256,7 +157,6 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
         msg += `Terima Kasih!`;
         
         const finalUrl = `${waUrl}?text=${encodeURIComponent(msg)}`;
-
         const keyboard = [
             [{ text: "📲 Chat WA User", url: finalUrl }],
             [{ text: "🛠 REVISI / EDIT DATA", callback_data: `REVISI_${orderId}` }]
@@ -267,12 +167,11 @@ async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
         });
     } catch (e) {
         console.error("SendSuccessNotification Error:", e);
-        await sendMessage(chatId, `⚠️ Gagal kirim format WA: ${e.message}`);
     }
 }
 
 /**
- * 3. MENU INPUT MANUAL (BIARKAN TETAP SAMA)
+ * 3. MENU INPUT MANUAL
  */
 async function showManualInputMenu(chatId, orderId, items) {
     let msg = `📋 <b>INPUT / EDIT DATA PRODUK</b>\nOrder ID: <code>${orderId}</code>\n\nPilih item yang ingin diisi/diubah:\n`;
