@@ -29,19 +29,14 @@ module.exports = async function(req, res) {
             
             if (data === 'ADMIN_MENU') await showAdminDashboard(chatId);
             
-            // 1. TOMBOL ACC: LANGSUNG FINALISASI (Tanpa Delay)
+            // 1. TOMBOL ACC: LANGSUNG FINALISASI
             else if (data.startsWith('ACC_')) {
                 const orderId = data.replace('ACC_', ''); 
-                await deleteMessage(chatId, messageId); // Hapus tombol ACC
+                await deleteMessage(chatId, messageId); 
 
-                // --- PERBAIKAN LOGIKA DISINI ---
-                // Jalankan proses pengurangan stok di database
                 const result = await processOrderStock(orderId);
-
-                // Kirim Notifikasi Sukses TERLEBIH DAHULU (Agar data produk utama muncul otomatis)
                 await sendSuccessNotification(chatId, orderId, "ACC ADMIN");
 
-                // Jika ada item yang masih kosong (perlu manual), tampilkan menunya
                 if (!result.success) {
                     await sendMessage(chatId, "⚠️ <b>Beberapa item memerlukan input manual:</b>");
                     await showManualInputMenu(chatId, orderId, result.items);
@@ -65,11 +60,11 @@ module.exports = async function(req, res) {
                 const parts = data.split('_');
                 const orderId = parts[1];
                 const itemIdx = parts[2];
-                // Simpan state user sedang input manual ke database/cache jika perlu
+                
                 await sendMessage(chatId, `📝 <b>INPUT DATA</b>\nSilakan kirim data untuk item ke-${parseInt(itemIdx)+1}.\n\n<i>Gunakan Enter untuk banyak baris.</i>\n\nContoh:\n<code>email:pass\nemail:pass</code>`, {
                     reply_markup: { force_reply: true }
                 });
-                // Simpan context admin untuk ReplyHandler (Bisa pakai metadata database)
+                
                 await db.collection('admin_context').doc(chatId.toString()).set({
                     action: 'WAITING_MANUAL_INPUT',
                     orderId: orderId,
@@ -82,16 +77,36 @@ module.exports = async function(req, res) {
                 await sendSuccessNotification(chatId, orderId, "MANUAL ADMIN");
                 await deleteMessage(chatId, messageId);
             }
+
+            // --- BARU: LOGIKA UNTUK MEMBALAS KOMPLAIN ---
+            // Format tombol di notifikasi komplain harus: REPLY_CS_{TicketID/UserID}
+            else if (data.startsWith('REPLY_CS_')) {
+                const ticketId = data.replace('REPLY_CS_', '');
+                
+                // Simpan state admin sedang membalas komplain
+                await db.collection('admin_context').doc(chatId.toString()).set({
+                    action: 'WAITING_COMPLAINT_REPLY',
+                    ticketId: ticketId
+                });
+
+                await sendMessage(chatId, `💬 <b>BALAS KOMPLAIN</b>\n\nSedang membalas Ticket ID: <code>${ticketId}</code>\nSilakan ketik pesan balasan Anda di bawah:`, {
+                    reply_markup: { force_reply: true }
+                });
+            }
         } 
 
-        // 2. LOGIKA REPLIES (UNTUK INPUT MANUAL)
-        else if (update.message && update.message.reply_to_message) {
+        // 2. LOGIKA REPLIES (TEXT INPUT DARI ADMIN)
+        else if (update.message && update.message.text) { // Ubah sedikit agar menangkap semua teks
             const chatId = update.message.chat.id;
             const text = update.message.text;
             
+            // Cek apakah admin sedang dalam "mode mengetik" (Context)
             const contextSnap = await db.collection('admin_context').doc(chatId.toString()).get();
+            
             if (contextSnap.exists) {
                 const context = contextSnap.data();
+
+                // --- A. JIKA SEDANG INPUT STOK MANUAL ---
                 if (context.action === 'WAITING_MANUAL_INPUT') {
                     const { orderId, itemIdx } = context;
                     const dataArray = text.split('\n').map(x => x.trim()).filter(x => x);
@@ -102,22 +117,46 @@ module.exports = async function(req, res) {
                         if(!doc.exists) return;
                         
                         const items = doc.data().items;
-                        
                         if(items[itemIdx]) {
                             items[itemIdx].data = dataArray; 
                             items[itemIdx].sn = dataArray;   
                             items[itemIdx].desc = dataArray.join('\n');
                             items[itemIdx].manualInputTime = new Date().toISOString();
                         }
-                        
-                        t.update(ref, { 
-                            items: items, 
-                            status: 'success' 
-                        });
+                        t.update(ref, { items: items, status: 'success' });
                     });
 
                     await sendMessage(chatId, `✅ <b>DATA TERSIMPAN!</b>\nSilakan cek Web user.`);
                     await sendSuccessNotification(chatId, orderId, "Data Manual Updated");
+                    await db.collection('admin_context').doc(chatId.toString()).delete();
+                }
+
+                // --- B. BARU: JIKA SEDANG MEMBALAS KOMPLAIN ---
+                else if (context.action === 'WAITING_COMPLAINT_REPLY') {
+                    const { ticketId } = context;
+
+                    // Update database komplain (Contoh: collection 'complaints')
+                    // Sesuaikan nama field dengan struktur DB kamu
+                    await db.collection('complaints').doc(ticketId).update({
+                        adminReply: text,
+                        status: 'replied',
+                        replyTime: new Date().toISOString(),
+                        isRead: false // Tandai user belum baca
+                    });
+
+                    // Opsional: Jika kamu menyimpan userID Telegram pembeli di dokumen komplain,
+                    // kamu bisa mengirim notifikasi langsung ke bot user.
+                    /*
+                    const ticketSnap = await db.collection('complaints').doc(ticketId).get();
+                    const buyerTelegramId = ticketSnap.data().telegramId;
+                    if(buyerTelegramId) {
+                        await sendMessage(buyerTelegramId, `🔔 <b>Admin Membalas:</b>\n${text}`);
+                    }
+                    */
+
+                    await sendMessage(chatId, `✅ <b>Balasan Terkirim!</b>\nTicket <code>${ticketId}</code> telah diupdate.`);
+                    
+                    // Hapus context agar admin bisa menggunakan bot seperti biasa lagi
                     await db.collection('admin_context').doc(chatId.toString()).delete();
                 }
             }
