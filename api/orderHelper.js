@@ -88,15 +88,18 @@ async function processOrderStock(orderId) {
                     needManual = true;
                 }
             } else {
-                // Produk Utama (Tanpa Varian)
-                const stokUtama = pData.items || [];
+                // --- PERBAIKAN STOK UTAMA DI SINI ---
+                // Mengambil dari pData.items (Array Stok)
+                const stokUtama = Array.isArray(pData.items) ? pData.items : [];
+                
                 if (stokUtama.length >= item.qty) {
                     stokDiambil = stokUtama.slice(0, item.qty);
-                    pData.items = stokUtama.slice(item.qty); // Update memori lokal
+                    pData.items = stokUtama.slice(item.qty); // Update memori
                     productEntry.modified = true;
                     logs.push(`✅ <b>${item.name}</b>: Stok Utama OK.`);
                 } else {
-                    logs.push(`❌ <b>${item.name}</b>: Stok Utama HABIS.`);
+                    // Jika stokUtama kosong, logs akan memberitahu admin
+                    logs.push(`❌ <b>${item.name}</b>: Stok Utama KOSONG/HABIS.`);
                     needManual = true;
                 }
             }
