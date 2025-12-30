@@ -88,8 +88,9 @@ module.exports = async function(req, res) {
              await sendMessage(ADMIN_CHAT_ID, text, {
                 reply_markup: {
                     inline_keyboard: [
-                        // Tombol ini akan mengirim sinyal "REPLY_TRX-..." ke bot utama
-                        [{ text: "📩 BALAS PESAN PEMBELI", callback_data: `REPLY_${orderId}` }]
+                        // PERUBAHAN ADA DISINI: 
+                        // Ubah 'REPLY_' menjadi 'REPLY_CS_' agar cocok dengan webhook.js
+                        [{ text: "📩 BALAS PESAN PEMBELI", callback_data: `REPLY_CS_${orderId}` }]
                     ]
                 }
              });
