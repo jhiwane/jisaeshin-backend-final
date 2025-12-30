@@ -59,9 +59,17 @@ module.exports = async function(req, res) {
                 await deleteMessage(chatId, messageId);
             }
 
-            // === C. FITUR BARU: RESOLVE (INPUT SISA ITEM) ===
+            // === C. SMART RESOLVE (AUTO CEK STOK DULU) ===
             else if (data.startsWith('RESOLVE_')) {
                 const orderId = data.replace('RESOLVE_', '');
+                
+                // 1. BERI TAHU ADMIN SEDANG CEK GUDANG
+                await sendMessage(chatId, "⏳ <i>Sedang mengecek stok di gudang...</i>");
+
+                // 2. COBA PROSES ULANG STOK (Agar kalau ada stok, langsung keambil)
+                await processOrderStock(orderId);
+
+                // 3. AMBIL DATA TERBARU (Setelah update stok di atas)
                 const orderDoc = await db.collection('orders').doc(orderId).get();
                 
                 if (!orderDoc.exists) {
@@ -70,10 +78,9 @@ module.exports = async function(req, res) {
                     const orderData = orderDoc.data();
                     const items = orderData.items || [];
                     
-                    // Cari item PERTAMA yang datanya masih kosong
+                    // 4. CARI ITEM YANG MASIH KOSONG SETELAH SCAN
                     let missingItemIndex = -1;
                     for (let i = 0; i < items.length; i++) {
-                        // Cek jika data kosong atau tidak ada
                         if (!items[i].data || items[i].data.length === 0) {
                             missingItemIndex = i;
                             break;
@@ -81,33 +88,32 @@ module.exports = async function(req, res) {
                     }
 
                     if (missingItemIndex !== -1) {
-                        // --- INI PERBAIKANNYA: Tampilkan Detail QTY ---
+                        // JIKA MASIH KOSONG -> MINTA INPUT MANUAL
                         const item = items[missingItemIndex];
                         const productName = item.name || "Produk Tanpa Nama";
                         const variantName = item.variation_name || item.variant || "-";
-                        const qtyNeeded = item.qty || 1; // Ambil jumlah QTY yang harus diisi
+                        const qtyNeeded = item.qty || 1;
 
                         await sendMessage(chatId, 
-                            `📝 <b>INPUT DATA MANUAL (PENDING)</b>\n` +
+                            `⚠️ <b>STOK MASIH KOSONG</b>\n` +
                             `Order ID: <code>${orderId}</code>\n\n` +
                             `📦 <b>Produk:</b> ${productName}\n` +
                             `🏷 <b>Variasi:</b> ${variantName}\n` +
                             `🔢 <b>Jumlah (Qty):</b> ${qtyNeeded} pcs\n\n` +
-                            `⚠️ <i>Stok habis. Silakan kirim ${qtyNeeded} baris data (akun/voucher) sekarang.</i>`, 
+                            `👇 <i>Silakan kirim ${qtyNeeded} baris data manual sekarang:</i>`, 
                             { reply_markup: { force_reply: true } }
                         );
 
-                        // Simpan Context
                         await db.collection('admin_context').doc(chatId.toString()).set({
                             action: 'RESOLVING_PENDING_ORDER',
                             orderId: orderId,
                             itemIdx: missingItemIndex
                         });
                     } else {
-                        // Jika SEMUA item ternyata sudah terisi penuh
+                        // JIKA TERNYATA SUDAH TERISI (Auto-Refill Berhasil)
                         await db.collection('orders').doc(orderId).update({ status: 'success' });
-                        await sendSuccessNotification(chatId, orderId, "MANUAL RESOLVED");
-                        await sendMessage(chatId, "✅ <b>BERES!</b> Semua item sudah terisi penuh.");
+                        await sendSuccessNotification(chatId, orderId, "AUTO-RESOLVED");
+                        await sendMessage(chatId, "✅ <b>BERES!</b> Stok ditemukan di gudang & otomatis terkirim.");
                         await deleteMessage(chatId, messageId);
                     }
                 }
@@ -140,7 +146,7 @@ module.exports = async function(req, res) {
                         `❌ Stok Kosong: <b>${totalCount - filledCount} Item</b>\n\n` +
                         `Item yang ada stoknya sudah masuk ke data user. Silakan input manual sisanya.`, 
                         {
-                            reply_markup: { inline_keyboard: [[{ text: "🛠 Input Sisa Item", callback_data: `RESOLVE_${orderId}` }]] }
+                            reply_markup: { inline_keyboard: [[{ text: "🛠 Cek Sisa Item", callback_data: `RESOLVE_${orderId}` }]] }
                         }
                     );
                 }
