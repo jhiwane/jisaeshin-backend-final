@@ -31,7 +31,13 @@ module.exports = async function(req, res) {
             console.log(`[DEBUG] Tombol diklik: ${data}`); 
 
             // === A. NAVIGATION & DASHBOARD ===
-            if (data === 'ADMIN_MENU') await showAdminDashboard(chatId);
+            // Di dalam telegram-webhook.js
+            
+            if (data === 'ADMIN_MENU') {
+                // Ganti showAdminDashboard(chatId) dengan ini:
+                await sendRealtimeDashboard(chatId, "🎛 <b>DASHBOARD UTAMA</b>");
+            }
+                
             else if (data === 'ADMIN_REPORT') await handleDailyReport(chatId);
             else if (data === 'ADMIN_STOCK') await handleLowStockCheck(chatId);
 
