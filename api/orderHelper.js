@@ -112,61 +112,52 @@ async function processOrderStock(orderId) {
         return { success: !needManual, logs, items, status: finalStatus };
     });
 }
-
-/**
- * 2. KIRIM NOTIFIKASI SUKSES
- */
+/*1.fungsi sukses order*/
 async function sendSuccessNotification(chatId, orderId, type = "OTOMATIS") {
     try {
         const snap = await db.collection('orders').doc(orderId).get();
         if (!snap.exists) return;
         const data = snap.data();
         
-        let targetPhone = data.phoneNumber || "";
-        
-        if (!targetPhone || targetPhone.length < 5) {
-            for (const item of (data.items || [])) {
-                if (item.note) {
-                    let cleanNote = item.note.replace(/\D/g, '');
-                    if (cleanNote.length >= 10 && cleanNote.length <= 15) {
-                        targetPhone = cleanNote;
-                        break;
-                    }
+        // Header sesuai permintaan kamu
+        let msg = `✅ <b>ORDER SELESAI (${type})</b>\n`;
+        msg += `ID: <code>${orderId}</code>\n`;
+        msg += `Status: Success\n`;
+
+        // Loop Item dengan penomoran
+        if (data.items && Array.isArray(data.items)) {
+            data.items.forEach((item, index) => {
+                // Format: item 1 :name qty: 100
+                msg += `item ${index + 1} :${item.name}  qty: ${item.qty || 1}\n`;
+                
+                // Jika ada data konten (stok), tampilkan di bawahnya
+                if (item.data && Array.isArray(item.data) && item.data.length > 0) {
+                    msg += `<code>${item.data.join('\n')}</code>\n`;
                 }
-            }
+                msg += `\n`; // Spasi antar produk
+            });
         }
 
+        msg += `👇 <b>Opsi Lanjutan:</b>`;
+
+        // Ambil nomor WA untuk tombol
+        let targetPhone = data.phoneNumber || "";
         targetPhone = targetPhone.replace(/\D/g, ''); 
         if (targetPhone.startsWith('0')) targetPhone = '62' + targetPhone.slice(1);
-        if (targetPhone.startsWith('8')) targetPhone = '62' + targetPhone;
-
-        const validPhone = (targetPhone.length >= 10 && targetPhone.startsWith('62'));
-        const waUrl = validPhone ? `https://wa.me/${targetPhone}` : `https://wa.me/`;
-
-        let msg = `Halo, Pesanan *${orderId}* Sukses!\n\n`;
-        data.items.forEach(i => {
-            msg += `📦 *${i.name}*\n`;
-            if(i.data && Array.isArray(i.data) && i.data.length > 0) {
-                msg += `<code>${i.data.join('\n')}</code>\n\n`;
-            } else if (i.note) {
-                msg += `_Note: ${i.note}_\nStatus: Diproses\n\n`;
-            } else {
-                msg += `-\n\n`;
-            }
-        });
-        msg += `Terima Kasih!`;
         
-        const finalUrl = `${waUrl}?text=${encodeURIComponent(msg)}`;
         const keyboard = [
-            [{ text: "📲 Chat WA User", url: finalUrl }],
+            [{ text: "📲 Chat WA User", url: `https://wa.me/${targetPhone}` }],
             [{ text: "🛠 REVISI / EDIT DATA", callback_data: `REVISI_${orderId}` }]
         ];
 
-        await sendMessage(chatId, `✅ <b>ORDER SELESAI (${type})</b>\nID: ${orderId}\nStatus: Success\n\n👇 <b>Opsi Lanjutan:</b>`, { 
-            reply_markup: { inline_keyboard: keyboard } 
+        // KIRIM PESAN (Satu kali kirim untuk semua item agar tidak delay)
+        await sendMessage(chatId, msg, { 
+            reply_markup: { inline_keyboard: keyboard },
+            parse_mode: 'HTML'
         });
+
     } catch (e) {
-        console.error("SendSuccessNotification Error:", e);
+        console.error("Gagal kirim notif:", e);
     }
 }
 
