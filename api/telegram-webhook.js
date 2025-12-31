@@ -223,24 +223,42 @@ module.exports = async function(req, res) {
                     await showFlexibleRevisionMenu(chatId, orderId, updatedItems);
                 }
 
-                // BALAS KOMPLAIN
-                else if (context.action === 'WAITING_COMPLAINT_REPLY') {
-                    const { ticketId } = context;
-                    await db.collection('orders').doc(ticketId).update({
-                        complaintReply: text,
-                        complaintStatus: 'replied',
-                        complaintReplyTime: new Date().toISOString(),
-                        hasNewReply: true
-                    });
-                    await sendMessage(chatId, `✅ Balasan terkirim.`);
-                    await db.collection('admin_context').doc(chatId.toString()).delete();
-                }
-            } else {
-                if (['/admin', '/menu', '/start'].includes(text)) await sendRealtimeDashboard(chatId, "🎛 <b>DASHBOARD</b>");
-            }
-        }
-    } catch (e) {
-        console.error("Webhook Error:", e);
-    }
-    return res.status(200).send('ok');
+                // 3. BALAS KOMPLAIN (REPLY_CS)
+                else if (context.action === 'WAITING_COMPLAINT_REPLY') {
+                    const { ticketId } = context;
+                    try {
+                        const orderRef = db.collection('orders').doc(ticketId);
+                        const orderSnap = await orderRef.get();
+
+                        if (!orderSnap.exists) {
+                            await sendMessage(chatId, `❌ Error: Order ${ticketId} tidak ditemukan.`);
+                        } else {
+                            await orderRef.update({
+                                complaintReply: text,
+                                complaintStatus: 'replied',
+                                complaintReplyTime: new Date().toISOString(),
+                                hasNewReply: true
+                            });
+                            await sendMessage(chatId, `✅ <b>Balasan Terkirim!</b>\nOrder: <code>${ticketId}</code>`);
+                        }
+                        await db.collection('admin_context').doc(chatId.toString()).delete();
+                    } catch (err) {
+                        console.error(err);
+                        await sendMessage(chatId, `❌ Gagal: ${err.message}`);
+                    }
+                }
+            } 
+            
+            // JIKA TIDAK ADA CONTEXT (Command Handler)
+            else {
+                // Trigger Menu Admin dengan mengetik /admin, /start, atau /menu
+                if (['/admin', '/start', '/menu'].includes(text.toLowerCase())) {
+                    await showAdminDashboard(chatId);
+                }
+            }
+        }
+    } catch (e) {
+        console.error("Webhook Error:", e);
+    }
+    return res.status(200).send('ok');
 };
