@@ -16,6 +16,42 @@ async function deleteMessage(chatId, messageId) {
     } catch(e) {}
 }
 
+// --- FUNGSI BARU: LOGIKA CEK PENDING (DIPISAH SUPAYA BISA DIPANGGIL LEWAT TEKS) ---
+async function handleCheckPending(chatId) {
+    const snapshot = await db.collection('orders')
+        .where('status', 'in', ['pending', 'manual_verification', 'manual_pending', 'process'])
+        .get();
+
+    if (snapshot.empty) {
+        await sendMessage(chatId, "✅ <b>Aman!</b> Tidak ada orderan gantung.");
+    } else {
+        let text = `⭕ <b>DAFTAR PENDING (${snapshot.size}):</b>\n\n`;
+        const keyboard = [];
+
+        snapshot.forEach(doc => {
+            const d = doc.data();
+            const itemsCount = d.items ? d.items.length : 0;
+            
+            // Label status biar admin tau kenapa pending
+            let statusLabel = '⚠️ CEK STOK/ERROR';
+            if (d.status === 'manual_pending') statusLabel = '💸 BELUM ACC TRANSFER';
+            if (d.status === 'pending') statusLabel = '⏳ MENUNGGU BAYAR';
+            
+            text += `🆔 <code>${doc.id}</code>\nStatus: ${statusLabel}\nItems: ${itemsCount} pcs\n\n`;
+            
+            // Tombol Dinamis
+            if (d.status === 'manual_pending') {
+                keyboard.push([{ text: `💸 ACC Transfer ${doc.id}`, callback_data: `ACC_${doc.id}` }]);
+            } else {
+                keyboard.push([{ text: `🛠 Proses Stok ${doc.id}`, callback_data: `ACC_${doc.id}` }]);
+            }
+        });
+        
+        keyboard.push([{ text: "🔙 Tutup", callback_data: "DONE_MANUAL" }]);
+        await sendMessage(chatId, text, { reply_markup: { inline_keyboard: keyboard } });
+    }
+}
+
 // --- FUNGSI MENU REVISI (TAMPILKAN SEMUA, BAIK ISI MAUPUN KOSONG) ---
 async function showFlexibleRevisionMenu(chatId, orderId, items) {
     let message = `🛠 <b>MENU EDIT / REVISI DATA</b>\nOrder ID: <code>${orderId}</code>\n\n` +
@@ -24,17 +60,11 @@ async function showFlexibleRevisionMenu(chatId, orderId, items) {
     
     const keyboard = [];
 
-    // Loop semua item (Tanpa Filter, Semua Ditampilkan)
     items.forEach((item, index) => {
-        // Cek status isi
         const isFilled = item.data && item.data.length > 0;
         const icon = isFilled ? "✅" : "❌";
-        
-        // Nama Item (dipotong biar rapi)
         let itemName = item.name.length > 15 ? item.name.substring(0, 15) + '...' : item.name;
         const variantInfo = item.variation_name ? `(${item.variation_name})` : '';
-        
-        // Label Tombol
         const buttonLabel = `✏️ ${icon} ${itemName} ${variantInfo}`;
         
         keyboard.push([{ 
@@ -43,9 +73,7 @@ async function showFlexibleRevisionMenu(chatId, orderId, items) {
         }]);
     });
 
-    // Tombol Tutup
     keyboard.push([{ text: "✅ Selesai / Tutup Menu", callback_data: "DONE_MANUAL" }]);
-
     await sendMessage(chatId, message, { reply_markup: { inline_keyboard: keyboard } });
 }
 
@@ -98,47 +126,14 @@ module.exports = async function(req, res) {
 
             console.log(`[DEBUG] Tombol: ${data}`); 
 
-            // === A. NAVIGATION ===
             if (data === 'ADMIN_MENU') await sendRealtimeDashboard(chatId, "🎛 <b>DASHBOARD UTAMA</b>");
             else if (data === 'ADMIN_REPORT') await handleDailyReport(chatId);
             else if (data === 'ADMIN_STOCK') await handleLowStockCheck(chatId);
 
             // === B. CEK ORDER PENDING (ALL IN ONE) ===
-            // MODIFIKASI: Menampilkan SEMUA status pending dalam satu list
             else if (data === 'CHECK_PENDING') {
-                const snapshot = await db.collection('orders')
-                    .where('status', 'in', ['pending', 'manual_verification', 'manual_pending', 'process'])
-                    .get();
-
-                if (snapshot.empty) {
-                    await sendMessage(chatId, "✅ <b>Aman!</b> Tidak ada orderan gantung.");
-                } else {
-                    let text = `⭕ <b>DAFTAR PENDING (${snapshot.size}):</b>\n\n`;
-                    const keyboard = [];
-
-                    snapshot.forEach(doc => {
-                        const d = doc.data();
-                        const itemsCount = d.items ? d.items.length : 0;
-                        
-                        // Label status biar admin tau kenapa pending
-                        let statusLabel = '⚠️ CEK STOK/ERROR';
-                        if (d.status === 'manual_pending') statusLabel = '💸 BELUM ACC TRANSFER';
-                        if (d.status === 'pending') statusLabel = '⏳ MENUNGGU BAYAR';
-                        
-                        text += `🆔 <code>${doc.id}</code>\nStatus: ${statusLabel}\nItems: ${itemsCount} pcs\n\n`;
-                        
-                        // Tombol Dinamis
-                        if (d.status === 'manual_pending') {
-                            keyboard.push([{ text: `💸 ACC Transfer ${doc.id}`, callback_data: `ACC_${doc.id}` }]);
-                        } else {
-                            keyboard.push([{ text: `🛠 Proses Stok ${doc.id}`, callback_data: `ACC_${doc.id}` }]);
-                        }
-                    });
-                    
-                    keyboard.push([{ text: "🔙 Tutup", callback_data: "DONE_MANUAL" }]);
-                    await sendMessage(chatId, text, { reply_markup: { inline_keyboard: keyboard } });
-                }
                 await deleteMessage(chatId, messageId);
+                await handleCheckPending(chatId); // Panggil fungsi yang baru dibuat
             }
 
             // === C. LOGIKA ACC / RESOLVE ===
@@ -147,14 +142,9 @@ module.exports = async function(req, res) {
                 await deleteMessage(chatId, messageId);
                 await sendMessage(chatId, "⏳ <i>Memproses stok...</i>");
 
-                // 1. PROSES STOCK
                 const result = await processOrderStock(orderId);
-
-                // 2. PAKSA STATUS SUKSES (Biar muncul di web user)
                 await db.collection('orders').doc(orderId).update({ status: 'success' });
                 await sendSuccessNotification(chatId, orderId, "PROCESSED");
-
-                // 3. TAMPILKAN MENU REVISI (Untuk isi yang kosong / cek data)
                 await showFlexibleRevisionMenu(chatId, orderId, result.items);
             }
 
@@ -179,7 +169,6 @@ module.exports = async function(req, res) {
                 const item = orderDoc.data().items[itemIdx];
                 const variantInfo = item.variation_name || item.variant || '-';
                 
-                // Tampilkan Data Lama
                 let extraMsg = "";
                 if (item.data && item.data.length > 0) {
                     const dataLama = item.data.join('\n');
@@ -228,7 +217,8 @@ module.exports = async function(req, res) {
         // --- 2. LOGIKA PESAN TEKS (COMMAND & TRACKING) ---
         else if (update.message && update.message.text) {
             const chatId = update.message.chat.id;
-            const text = update.message.text.trim(); // Hapus spasi depan/belakang
+            const text = update.message.text.trim();
+            const lowerText = text.toLowerCase();
             
             const contextSnap = await db.collection('admin_context').doc(chatId.toString()).get();
             
@@ -276,17 +266,20 @@ module.exports = async function(req, res) {
                 }
             } 
             
-            // JIKA TIDAK ADA CONTEXT -> CEK APAKAH INI PERINTAH TRACKING?
+            // JIKA TIDAK ADA CONTEXT
             else {
-                // Jika user mengetik /admin, /menu, dll
-                if (['/admin', '/menu', '/start'].includes(text.toLowerCase())) {
-                    await sendRealtimeDashboard(chatId, "🎛 <b>DASHBOARD</b>");
+                // 1. CEK COMMAND PENDING (INI YANG BARU)
+                if (['pending', '/pending', 'cek pending'].includes(lowerText)) {
+                    await handleCheckPending(chatId);
                 }
                 
-                // === LOGIKA TRACKING (Cukup kirim Order ID) ===
-                // Syarat: Bukan command '/', dan panjangnya wajar (misal TRX-...)
+                // 2. CEK COMMAND ADMIN LAIN
+                else if (['/admin', '/menu', '/start', 'menu', 'dashboard'].includes(lowerText)) {
+                    await sendRealtimeDashboard(chatId, "🎛 <b>DASHBOARD UTAMA</b>");
+                }
+                
+                // 3. TRACKING ORDER (JIKA BUKAN COMMAND)
                 else if (!text.startsWith('/')) {
-                    // Anggap admin sedang mencoba mencari Order ID
                     await trackOrder(chatId, text);
                 }
             }
