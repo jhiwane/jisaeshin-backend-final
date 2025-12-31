@@ -16,46 +16,40 @@ async function deleteMessage(chatId, messageId) {
     } catch(e) {}
 }
 
-// --- FUNGSI PENTING: MENAMPILKAN TOMBOL REVISI PER ITEM ---
+// --- FUNGSI MENU REVISI (TAMPILKAN SEMUA, BAIK ISI MAUPUN KOSONG) ---
 async function showFlexibleRevisionMenu(chatId, orderId, items) {
-    let message = `🛠 <b>MENU REVISI / INPUT MANUAL</b>\nOrder ID: <code>${orderId}</code>\n\n` +
-                  `✅ <b>Status: SUKSES</b> (Data sudah dikirim ke Web).\n` +
-                  `⚠️ Tapi item di bawah ini kosong. Klik untuk isi manual:\n`;
+    let message = `🛠 <b>MENU EDIT / REVISI DATA</b>\nOrder ID: <code>${orderId}</code>\n\n` +
+                  `Silakan klik item di bawah ini untuk melihat atau mengubah isinya.\n` +
+                  `<i>(Berguna jika ada data salah kirim atau ingin revisi sebagian)</i>\n`;
     
     const keyboard = [];
-    let missingCount = 0;
 
-    // Loop semua item (Mau 3 item sama, atau variasi beda, semua di-loop)
+    // Loop semua item (Tanpa Filter, Semua Ditampilkan)
     items.forEach((item, index) => {
-        // Cek apakah item ini datanya kosong?
-        const isDataEmpty = !item.data || item.data.length === 0;
+        // Cek status isi
+        const isFilled = item.data && item.data.length > 0;
         
-        if (isDataEmpty) {
-            missingCount++;
-            
-            // Nama Item (dipotong biar rapi)
-            let itemName = item.name.length > 15 ? item.name.substring(0, 15) + '...' : item.name;
-            const variantInfo = item.variation_name ? `(${item.variation_name})` : '';
-            
-            // Kita tambah (Index + 1) agar jika ada item kembar, admin tau ini item urutan keberapa
-            const buttonLabel = `✏️ Isi: ${itemName} ${variantInfo} #${index + 1}`;
-            
-            keyboard.push([{ 
-                text: buttonLabel, 
-                callback_data: `FILL_${orderId}_${index}` // KUNCI: Bawa Index Item
-            }]);
-        }
+        // Ikon Status
+        const icon = isFilled ? "✅" : "❌";
+        const statusText = isFilled ? "Terisi" : "KOSONG";
+        
+        // Nama Item (dipotong biar rapi)
+        let itemName = item.name.length > 15 ? item.name.substring(0, 15) + '...' : item.name;
+        const variantInfo = item.variation_name ? `(${item.variation_name})` : '';
+        
+        // Label Tombol
+        const buttonLabel = `✏️ ${icon} ${itemName} ${variantInfo}`;
+        
+        keyboard.push([{ 
+            text: buttonLabel, 
+            callback_data: `FILL_${orderId}_${index}` 
+        }]);
     });
 
     // Tombol Tutup
     keyboard.push([{ text: "✅ Selesai / Tutup Menu", callback_data: "DONE_MANUAL" }]);
 
-    if (missingCount === 0) {
-        // Jika ternyata penuh semua
-        await sendMessage(chatId, `✅ <b>SEMUA ITEM LENGKAP!</b>\nTidak ada yang perlu direvisi.`);
-    } else {
-        await sendMessage(chatId, message, { reply_markup: { inline_keyboard: keyboard } });
-    }
+    await sendMessage(chatId, message, { reply_markup: { inline_keyboard: keyboard } });
 }
 
 module.exports = async function(req, res) {
@@ -89,7 +83,6 @@ module.exports = async function(req, res) {
                     snapshot.forEach(doc => {
                         const d = doc.data();
                         text += `🆔 <code>${doc.id}</code> (${d.items.length} Item)\n`;
-                        // Tombol langsung ke logika "Hajar Dulu" (ACC)
                         keyboard.push([{ text: `🛠 Proses ${doc.id}`, callback_data: `ACC_${doc.id}` }]);
                     });
                     keyboard.push([{ text: "🔙 Kembali", callback_data: "ADMIN_MENU" }]);
@@ -99,52 +92,51 @@ module.exports = async function(req, res) {
             }
 
             // === C. LOGIKA ACC / RESOLVE (HAJAR DULU BARU REVISI) ===
-            // Baik tombol ACC_ atau RESOLVE_, logikanya kita samakan sesuai request:
-            // 1. Ambil Stok -> 2. Paksa Sukses -> 3. Tampilkan Menu Revisi
             else if (data.startsWith('ACC_') || data.startsWith('RESOLVE_')) {
-                // Bersihkan prefix untuk dapat Order ID
                 const orderId = data.replace('ACC_', '').replace('RESOLVE_', '');
                 
                 await deleteMessage(chatId, messageId);
-                await sendMessage(chatId, "⏳ <i>Memproses semua item & cek stok...</i>");
+                await sendMessage(chatId, "⏳ <i>Memproses stok & update database...</i>");
 
-                // 1. PROSES STOCK (Mengambil dari Produk Utama / Variasi)
-                // Fungsi ini akan mengisi item.data jika stok tersedia
+                // 1. PROSES STOCK
                 const result = await processOrderStock(orderId);
 
-                // 2. PAKSA STATUS SUKSES (Kunci Request Kamu)
-                // Agar user langsung lihat data di web, meskipun ada item yang masih kosong
+                // 2. PAKSA STATUS SUKSES
                 await db.collection('orders').doc(orderId).update({ status: 'success' });
-                
-                // Beri notifikasi sukses standar
                 await sendSuccessNotification(chatId, orderId, "PROCESSED");
 
-                // 3. TAMPILKAN MENU REVISI (Hanya untuk item yang masih kosong)
-                // Kita oper 'result.items' karena itu data terbaru yang sudah dicoba diisi stok
+                // 3. TAMPILKAN MENU REVISI (TAMPIL SEMUA ITEM)
                 await showFlexibleRevisionMenu(chatId, orderId, result.items);
             }
             
-            // === D. LOGIKA INPUT ITEM (FILL) ===
+            // === D. LOGIKA INPUT ITEM / EDIT (FILL) ===
             else if (data.startsWith('FILL_')) {
-                // Format: FILL_ORDERID_INDEX
                 const parts = data.split('_');
                 const orderId = parts[1];
-                const itemIdx = parseInt(parts[2]); // Index array (0, 1, 2...)
+                const itemIdx = parseInt(parts[2]);
                 
-                // Ambil data order untuk info
                 const orderDoc = await db.collection('orders').doc(orderId).get();
                 if (!orderDoc.exists) return;
                 
                 const item = orderDoc.data().items[itemIdx];
                 const variantInfo = item.variation_name || item.variant || '-';
+                
+                // LOGIKA BARU: TAMPILKAN DATA LAMA JIKA ADA
+                let extraMsg = "";
+                if (item.data && item.data.length > 0) {
+                    const dataLama = item.data.join('\n');
+                    extraMsg = `📂 <b>DATA SAAT INI (Klik untuk Copy):</b>\n` +
+                               `<code>${dataLama}</code>\n\n` +
+                               `👆 <i>Copy teks di atas, edit bagian yang salah (misal no 7), lalu kirimkan versi lengkapnya ke sini.</i>\n\n`;
+                }
 
                 await sendMessage(chatId, 
-                    `📝 <b>INPUT DATA MANUAL</b>\n` +
+                    `📝 <b>EDIT / INPUT DATA MANUAL</b>\n` +
                     `📦 Produk: <b>${item.name}</b>\n` +
                     `🏷 Variasi: ${variantInfo}\n` +
-                    `🔢 Urutan Item: #${itemIdx + 1}\n` +
                     `🔢 Butuh Qty: <b>${item.qty}</b>\n\n` +
-                    `<i>Silakan kirim data (akun/voucher) sekarang:</i>`, 
+                    extraMsg +
+                    `👇 <i>Silakan kirim data baru (akan menimpa data lama):</i>`, 
                     { reply_markup: { force_reply: true } }
                 );
 
@@ -159,7 +151,7 @@ module.exports = async function(req, res) {
             // === E. TOMBOL LAINNYA ===
             else if (data === 'DONE_MANUAL') {
                 await deleteMessage(chatId, messageId);
-                await sendMessage(chatId, "✅ Selesai. Menu ditutup.");
+                await sendMessage(chatId, "✅ Menu Edit Ditutup.");
             }
             else if (data.startsWith('REJECT_')) {
                 const orderId = data.replace('REJECT_', '');
@@ -186,12 +178,12 @@ module.exports = async function(req, res) {
             if (contextSnap.exists) {
                 const context = contextSnap.data();
 
-                // INPUT MANUAL (DARI MENU REVISI)
+                // INPUT MANUAL / EDIT (DARI MENU REVISI)
                 if (context.action === 'WAITING_MANUAL_INPUT') {
                     const { orderId, itemIdx } = context;
                     const dataArray = text.split('\n').map(x => x.trim()).filter(x => x);
                     
-                    // 1. Simpan Data ke DB (TIMPA DATA LAMA/KOSONG)
+                    // 1. Simpan Data ke DB (MENIMPA DATA LAMA)
                     await db.runTransaction(async (t) => {
                         const ref = db.collection('orders').doc(orderId);
                         const doc = await t.get(ref);
@@ -199,7 +191,6 @@ module.exports = async function(req, res) {
                         
                         const items = doc.data().items;
                         
-                        // Pastikan index valid
                         if(items[itemIdx]) {
                             items[itemIdx].data = dataArray; 
                             items[itemIdx].sn = dataArray;   
@@ -207,7 +198,6 @@ module.exports = async function(req, res) {
                             items[itemIdx].manualInputTime = new Date().toISOString();
                         }
                         
-                        // Update items saja, status sudah success dari awal
                         t.update(ref, { items: items });
                     });
 
@@ -215,13 +205,12 @@ module.exports = async function(req, res) {
                     await db.collection('admin_context').doc(chatId.toString()).delete();
 
                     // 3. AUTO-REFRESH MENU REVISI
-                    // Ambil data terbaru untuk melihat mana lagi yang masih kosong
                     const updatedDoc = await db.collection('orders').doc(orderId).get();
                     const updatedItems = updatedDoc.data().items;
                     
-                    await sendMessage(chatId, `✅ Item #${itemIdx+1} Tersimpan.`);
+                    await sendMessage(chatId, `✅ Item #${itemIdx+1} Berhasil Diupdate!`);
                     
-                    // Tampilkan lagi menu revisi (tombol item yang sudah diisi akan hilang otomatis)
+                    // Tampilkan lagi menu (Tombol ✅ tetap muncul agar bisa diedit lagi kalau mau)
                     await showFlexibleRevisionMenu(chatId, orderId, updatedItems);
                 }
 
