@@ -1,28 +1,22 @@
 const { db } = require('./firebaseConfig');
 const { sendMessage } = require('./botConfig');
-// Import Otak Utama
 const { processOrderStock, sendSuccessNotification, showManualInputMenu } = require('./orderHelper');
-// Import Helper Realtime Dashboard (Kode Baru)
 const { sendRealtimeDashboard } = require('./adminRealtime');
 
-const ADMIN_CHAT_ID = '1383656187'; // ID Admin Anda
+const ADMIN_CHAT_ID = '1383656187'; 
 
-// Fungsi helper aman dari karakter khusus
+// Fungsi Helper Item List
 function buildItemsListSafe(items) {
     let itemsDetail = "";
     const MAX_DISPLAY = 50; 
     
     if (items && Array.isArray(items)) {
         const displayItems = items.slice(0, MAX_DISPLAY);
-        
         displayItems.forEach(i => {
-            // Perbaikan Karakter & (Ampersand) agar tidak error di Telegram
             const safeName = (i.name || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             const safeNote = i.note ? `\n    📝 <i>Input: ${(i.note).replace(/&/g, '&amp;').replace(/</g, '&lt;')}</i>` : '';
-            
             itemsDetail += `📦 <b>${safeName}</b>\n    Qty: ${i.qty} x Rp${(parseInt(i.price)||0).toLocaleString()}${safeNote}\n`;
         });
-
         if (items.length > MAX_DISPLAY) {
             itemsDetail += `\n... <i>➕ Dan ${items.length - MAX_DISPLAY} item lainnya</i>\n`;
         }
@@ -31,46 +25,37 @@ function buildItemsListSafe(items) {
 }
 
 module.exports = async function(req, res) {
-    // Penyesuaian untuk Midtrans (order_id) atau Saldo (orderId)
     const payload = req.body;
+    
+    // Ambil Order ID & Status dari berbagai kemungkinan sumber
     const orderId = payload.order_id || payload.orderId;
-    const type = payload.type;
-    const statusMidtrans = payload.transaction_status;
+    const type = payload.type; // manual, otomatis, complaint, pending, dll
+    const statusMidtrans = payload.transaction_status; // settlement, pending, expire
+    const statusPayload = payload.status; // process, pending (dari backend sendiri)
 
     try {
-        // --- AMBIL DATA DARI DB (PENTING AGAR MIDTRANS TIDAK ERROR) ---
+        // --- 1. CEK DATABASE DULU (Wajib ada) ---
         const orderRef = db.collection('orders').doc(orderId);
         const orderSnap = await orderRef.get();
         
         if (!orderSnap.exists) {
-            // Jika ID tidak ada di DB, kita beri respon 200 agar Midtrans berhenti kirim email error
             return res.status(200).send('Order not found');
         }
 
         const orderFromDb = orderSnap.data();
         const finalItems = orderFromDb.items || payload.items;
         const itemsDetail = buildItemsListSafe(finalItems);
+        const totalHarga = parseInt(payload.total || orderFromDb.total || 0).toLocaleString();
 
-        // ALUR 1: PEMBAYARAN MANUAL
+        // =================================================================
+        // LOGIKA NOTIFIKASI (DIBUAT LEBIH "PEKA")
+        // =================================================================
+
+        // KASUS A: PEMBAYARAN MANUAL (TRANSFER)
         if (type === 'manual') {
-            const displayContact = payload.buyerContact && payload.buyerContact.includes('|') 
-                ? `\n<pre>${payload.buyerContact.replace(/ \| /g, '\n')}</pre>` 
-                : `<code>${payload.buyerContact}</code>`;
+            const displayContact = payload.buyerContact ? `<code>${payload.buyerContact}</code>` : 'Guest';
+            const text = `💸 <b>PEMBAYARAN MANUAL MASUK</b>\n🆔 ID: <code>${orderId}</code>\n💰 Rp ${totalHarga}\n👤 ${displayContact}\n\n🛒 <b>Items:</b>\n${itemsDetail}`;
 
-            const text = `💸 <b>PEMBAYARAN MANUAL MASUK</b>\n\n` +
-                         `🆔 ID: <code>${orderId}</code>\n` +
-                         `💰 Total: Rp ${(parseInt(payload.total)||0).toLocaleString()}\n` +
-                         `👤 User: ${displayContact}\n\n` +
-                         `🛒 <b>Items:</b>\n${itemsDetail}\n` +
-                         `👇 <b>TINDAKAN:</b>\nCek mutasi bank/e-wallet. Jika dana masuk, klik ACC.`;
-
-            // KODE BARU: Gunakan Realtime Dashboard agar admin melihat status pending
-            // Kita modifikasi sedikit logic tombol ACC/REJECT agar masuk ke dashboard
-            // TAPI karena Anda butuh tombol ACC/REJECT spesifik di sini, kita tetap pakai sendMessage biasa
-            // untuk tombol utamanya, lalu kita kirim Dashboard susulan ATAU kita gabungkan.
-            
-            // SOLUSI TERBAIK: Kirim pesan Order Manual seperti biasa (agar tombol ACC ada), 
-            // lalu kirim Dashboard Info di bawahnya.
             await sendMessage(ADMIN_CHAT_ID, text, {
                 reply_markup: {
                     inline_keyboard: [
@@ -79,66 +64,77 @@ module.exports = async function(req, res) {
                     ]
                 }
             });
-
-            // Kirim status dashboard terkini (agar notif "Pending: X" muncul)
-            await sendRealtimeDashboard(ADMIN_CHAT_ID, "🔔 <i>Info Status Antrian:</i>");
+            await sendRealtimeDashboard(ADMIN_CHAT_ID, "🔔 <i>Cek mutasi bank sekarang:</i>");
         } 
         
-        // --- ALUR 1.5: KOMPLAIN / LAPOR MASALAH ---
+        // KASUS B: KOMPLAIN USER
         else if (type === 'complaint') {
-             const complaintMsg = (payload.message || "Tidak ada pesan").replace(/&/g, '&amp;').replace(/</g, '&lt;');
-             const senderName = (payload.buyerContact || "Guest").replace(/&/g, '&amp;').replace(/</g, '&lt;');
-
-             const text = `⚠️ <b>LAPORAN KOMPLAIN BARU</b>\n\n` +
-                          `🆔 Order ID: <code>${orderId}</code>\n` +
-                          `👤 Pelapor: <b>${senderName}</b>\n\n` +
-                          `💬 <b>Pesan Masalah:</b>\n<pre>${complaintMsg}</pre>\n\n` +
-                          `🛒 <b>Barang Terkait:</b>\n${itemsDetail}\n` +
-                          `💡 <i>Klik tombol di bawah untuk membalas pesan user ini.</i>`;
+             const complaintMsg = (payload.message || "-").replace(/&/g, '&amp;').replace(/</g, '&lt;');
+             const text = `⚠️ <b>KOMPLAIN BARU</b>\n🆔 <code>${orderId}</code>\n💬 <pre>${complaintMsg}</pre>\n\n🛒 ${itemsDetail}`;
             
-             // PENAMBAHAN TOMBOL REPLY DISINI
              await sendMessage(ADMIN_CHAT_ID, text, {
                 reply_markup: {
-                    inline_keyboard: [
-                        // Ubah 'REPLY_' menjadi 'REPLY_CS_' agar cocok dengan webhook.js
-                        [{ text: "📩 BALAS PESAN PEMBELI", callback_data: `REPLY_CS_${orderId}` }]
-                    ]
+                    inline_keyboard: [[{ text: "📩 BALAS PESAN", callback_data: `REPLY_CS_${orderId}` }]]
                 }
              });
-
-             // KODE BARU: Info Dashboard Susulan
-             await sendRealtimeDashboard(ADMIN_CHAT_ID, "ℹ️ <i>Status dashboard saat ini:</i>");
+             await sendRealtimeDashboard(ADMIN_CHAT_ID, "ℹ️ <i>Status dashboard:</i>");
         }
 
-        // ALUR 2: PEMBAYARAN OTOMATIS (SALDO / MIDTRANS SETTLEMENT)
-        else if (statusMidtrans === 'settlement' || statusMidtrans === 'capture' || type === 'otomatis') {
-            
+        // KASUS C: SUKSES / LUNAS (Midtrans Settlement / Saldo Otomatis)
+        else if (statusMidtrans === 'settlement' || statusMidtrans === 'capture' || type === 'otomatis' || statusPayload === 'success') {
+            // Coba ambil stok & kirim otomatis
             const result = await processOrderStock(orderId);
-            
-            // Kirim notifikasi hasil tarik stok (Produk Utama akan muncul di sini)
             await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "OTOMATIS");
 
             if (!result.success) {
-                // KODE BARU: Gunakan SendRealtimeDashboard untuk notifikasi stok kosong
-                // Ini menggantikan sendMessage biasa agar tombol "Proses Manual" lebih mencolok
-                const alertMsg = `⚠️ <b>STOK PERLU INPUT MANUAL</b>\nOrder ID: <code>${orderId}</code>\nSebagian/Semua item kosong.`;
+                // Jika stok kosong, Bot Lapor "BUTUH MANUAL"
+                const alertMsg = `⚠️ <b>STOK KOSONG (BUTUH MANUAL)</b>\nOrder ID: <code>${orderId}</code>\nStatus: Paid (Lunas), tapi stok di gudang kurang.`;
                 await sendRealtimeDashboard(ADMIN_CHAT_ID, alertMsg);
-                
-                // Tetap munculkan menu input manual yang detail
                 await showManualInputMenu(ADMIN_CHAT_ID, orderId, result.items);
             }
         }
 
-        // SELALU KIRIM STATUS 200 OK KE MIDTRANS
+        // KASUS D: PENDING / PROCESS / MENUNGGU BAYAR (SEMUA METODE)
+        // Ini jaring pengaman agar bot selalu lapor status gantung
+        else if (
+            statusMidtrans === 'pending' || 
+            statusMidtrans === 'authorize' || 
+            type === 'pending' || 
+            type === 'process' || 
+            statusPayload === 'pending' || 
+            statusPayload === 'process'
+        ) {
+            // Update status DB agar sinkron
+            await orderRef.update({ status: 'pending' });
+
+            // Tentukan Label Status
+            let labelStatus = "PENDING";
+            if (statusMidtrans) labelStatus = statusMidtrans.toUpperCase();
+            else if (type) labelStatus = type.toUpperCase();
+
+            const pendingMsg = `⏳ <b>ORDER STATUS: ${labelStatus}</b>\n\n` +
+                               `🆔 ID: <code>${orderId}</code>\n` +
+                               `💰 Total: Rp ${totalHarga}\n` +
+                               `📦 Item: ${finalItems.length} pcs\n\n` +
+                               `<i>Bot memantau... Notifikasi akan muncul lagi saat status berubah Lunas/Gagal.</i>`;
+            
+            // KIRIM NOTIFIKASI DASHBOARD
+            await sendRealtimeDashboard(ADMIN_CHAT_ID, pendingMsg);
+        }
+
+        // KASUS E: MANUAL VERIFICATION / MACET (SEMUA METODE)
+        // Ini prioritas tinggi, biasanya stok habis atau error sistem
+        else if (type === 'manual_verification' || statusPayload === 'manual_verification' || orderFromDb.status === 'manual_verification') {
+             const alertMsg = `🔴 <b>BUTUH VERIFIKASI MANUAL!</b>\nOrder ID: <code>${orderId}</code>\n\nSistem menahan order ini (Stok habis / Error). Segera cek via tombol di bawah!`;
+             
+             // Pakai dashboard agar tombol RESOLVE muncul
+             await sendRealtimeDashboard(ADMIN_CHAT_ID, alertMsg);
+        }
+
         return res.status(200).json({ status: 'ok' });
 
     } catch (e) {
         console.error("NOTIFY ERROR:", e.message); 
-        // Tetap kirim 200 agar Midtrans tidak mengirim email error terus menerus
         res.status(200).send('Error handeled');
-        
-        try {
-             await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>SYSTEM ERROR</b>\nGagal memproses notifikasi Order ID: ${orderId || 'Unknown'}.\nError: ${e.message}`);
-        } catch (errInner) {}
     }
 };
