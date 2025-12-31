@@ -55,6 +55,7 @@ app.post('/api/token', async (req, res) => {
 
 // Jalur Webhook & Notify (Disederhanakan)
 app.post('/api/notify', notifyHandler);
+app.post('/api/notification', notifyHandler);
 app.post('/api/midtrans-webhook', midtransWebhookHandler);
 app.post('/api/telegram-webhook', telegramHandler);
 
