@@ -16,7 +16,22 @@ async function deleteMessage(chatId, messageId) {
     } catch(e) {}
 }
 
-// --- FUNGSI BARU: LOGIKA CEK PENDING (DIPISAH SUPAYA BISA DIPANGGIL LEWAT TEKS) ---
+// --- HELPER WA LINK ---
+function getWaLink(contactString, message = "") {
+    if (!contactString) return null;
+    let num = contactString.replace(/\D/g, ''); 
+    if (num.startsWith('0')) num = '62' + num.substring(1);
+    else if (num.startsWith('8')) num = '62' + num;
+    
+    if (num.length > 9) {
+        let url = `https://wa.me/${num}`;
+        if (message) url += `?text=${encodeURIComponent(message)}`;
+        return url;
+    }
+    return null;
+}
+
+// --- FUNGSI BARU: LOGIKA CEK PENDING ---
 async function handleCheckPending(chatId) {
     const snapshot = await db.collection('orders')
         .where('status', 'in', ['pending', 'manual_verification', 'manual_pending', 'process'])
@@ -31,15 +46,12 @@ async function handleCheckPending(chatId) {
         snapshot.forEach(doc => {
             const d = doc.data();
             const itemsCount = d.items ? d.items.length : 0;
-            
-            // Label status biar admin tau kenapa pending
             let statusLabel = '⚠️ CEK STOK/ERROR';
             if (d.status === 'manual_pending') statusLabel = '💸 BELUM ACC TRANSFER';
             if (d.status === 'pending') statusLabel = '⏳ MENUNGGU BAYAR';
             
             text += `🆔 <code>${doc.id}</code>\nStatus: ${statusLabel}\nItems: ${itemsCount} pcs\n\n`;
             
-            // Tombol Dinamis
             if (d.status === 'manual_pending') {
                 keyboard.push([{ text: `💸 ACC Transfer ${doc.id}`, callback_data: `ACC_${doc.id}` }]);
             } else {
@@ -52,8 +64,8 @@ async function handleCheckPending(chatId) {
     }
 }
 
-// --- FUNGSI MENU REVISI (TAMPILKAN SEMUA, BAIK ISI MAUPUN KOSONG) ---
-async function showFlexibleRevisionMenu(chatId, orderId, items) {
+// --- FUNGSI MENU REVISI (UPDATE ADA TOMBOL WA) ---
+async function showFlexibleRevisionMenu(chatId, orderId, items, buyerContact = "") {
     let message = `🛠 <b>MENU EDIT / REVISI DATA</b>\nOrder ID: <code>${orderId}</code>\n\n` +
                   `Silakan klik item di bawah ini untuk melihat atau mengubah isinya.\n` +
                   `<i>(Berguna jika ada komplain produk cacat atau salah kirim)</i>\n`;
@@ -73,11 +85,19 @@ async function showFlexibleRevisionMenu(chatId, orderId, items) {
         }]);
     });
 
+    // --- TOMBOL WA OTOMATIS (DONE) ---
+    const doneText = "Done ✅ silahkan buka webnya https://jsn-02.web.app untuk melihat konten disana";
+    const waLink = getWaLink(buyerContact, doneText);
+    
+    if (waLink) {
+        keyboard.push([{ text: "📲 INFOIN BUYER (DONE ✅)", url: waLink }]);
+    }
+
     keyboard.push([{ text: "✅ Selesai / Tutup Menu", callback_data: "DONE_MANUAL" }]);
     await sendMessage(chatId, message, { reply_markup: { inline_keyboard: keyboard } });
 }
 
-// --- FUNGSI BARU: TRACKING ORDER ---
+// --- FUNGSI TRACKING ---
 async function trackOrder(chatId, orderId) {
     const doc = await db.collection('orders').doc(orderId).get();
     
@@ -130,34 +150,37 @@ module.exports = async function(req, res) {
             else if (data === 'ADMIN_REPORT') await handleDailyReport(chatId);
             else if (data === 'ADMIN_STOCK') await handleLowStockCheck(chatId);
 
-            // === B. CEK ORDER PENDING (ALL IN ONE) ===
             else if (data === 'CHECK_PENDING') {
                 await deleteMessage(chatId, messageId);
-                await handleCheckPending(chatId); // Panggil fungsi yang baru dibuat
+                await handleCheckPending(chatId);
             }
 
-            // === C. LOGIKA ACC / RESOLVE ===
             else if (data.startsWith('ACC_') || data.startsWith('RESOLVE_')) {
                 const orderId = data.replace('ACC_', '').replace('RESOLVE_', '');
                 await deleteMessage(chatId, messageId);
                 await sendMessage(chatId, "⏳ <i>Memproses stok...</i>");
 
+                // Ambil Data Order Dulu (Untuk Kontak)
+                const docSnap = await db.collection('orders').doc(orderId).get();
+                let contact = "";
+                if(docSnap.exists) contact = docSnap.data().buyerContact;
+
                 const result = await processOrderStock(orderId);
                 await db.collection('orders').doc(orderId).update({ status: 'success' });
                 await sendSuccessNotification(chatId, orderId, "PROCESSED");
-                await showFlexibleRevisionMenu(chatId, orderId, result.items);
+                
+                // Pass Contact ke Menu Revisi
+                await showFlexibleRevisionMenu(chatId, orderId, result.items, contact);
             }
 
-            // === D. LOGIKA REVISI (DARI TOMBOL TRACKING) ===
             else if (data.startsWith('REVISI_')) {
                 const orderId = data.replace('REVISI_', '');
                 const doc = await db.collection('orders').doc(orderId).get();
                 if (doc.exists) {
-                    await showFlexibleRevisionMenu(chatId, orderId, doc.data().items);
+                    await showFlexibleRevisionMenu(chatId, orderId, doc.data().items, doc.data().buyerContact);
                 }
             }
             
-            // === E. LOGIKA INPUT / EDIT ITEM (FILL) ===
             else if (data.startsWith('FILL_')) {
                 const parts = data.split('_');
                 const orderId = parts[1];
@@ -194,7 +217,6 @@ module.exports = async function(req, res) {
                 });
             }
 
-            // === F. TOMBOL LAINNYA ===
             else if (data === 'DONE_MANUAL') {
                 await deleteMessage(chatId, messageId);
                 await sendMessage(chatId, "✅ Menu Ditutup.");
@@ -214,7 +236,6 @@ module.exports = async function(req, res) {
             }
         } 
 
-        // --- 2. LOGIKA PESAN TEKS (COMMAND & TRACKING) ---
         else if (update.message && update.message.text) {
             const chatId = update.message.chat.id;
             const text = update.message.text.trim();
@@ -225,7 +246,6 @@ module.exports = async function(req, res) {
             if (contextSnap.exists) {
                 const context = contextSnap.data();
 
-                // INPUT MANUAL / EDIT
                 if (context.action === 'WAITING_MANUAL_INPUT') {
                     const { orderId, itemIdx } = context;
                     const dataArray = text.split('\n').map(x => x.trim()).filter(x => x);
@@ -249,10 +269,10 @@ module.exports = async function(req, res) {
                     
                     const updatedDoc = await db.collection('orders').doc(orderId).get();
                     await sendMessage(chatId, `✅ Item #${itemIdx+1} Berhasil Diupdate!`);
-                    await showFlexibleRevisionMenu(chatId, orderId, updatedDoc.data().items);
+                    // Pass Contact ke Menu Revisi (Refresh)
+                    await showFlexibleRevisionMenu(chatId, orderId, updatedDoc.data().items, updatedDoc.data().buyerContact);
                 }
 
-                // BALAS KOMPLAIN
                 else if (context.action === 'WAITING_COMPLAINT_REPLY') {
                     const { ticketId } = context;
                     await db.collection('orders').doc(ticketId).update({
@@ -266,19 +286,13 @@ module.exports = async function(req, res) {
                 }
             } 
             
-            // JIKA TIDAK ADA CONTEXT
             else {
-                // 1. CEK COMMAND PENDING (INI YANG BARU)
                 if (['pending', '/pending', 'cek pending'].includes(lowerText)) {
                     await handleCheckPending(chatId);
                 }
-                
-                // 2. CEK COMMAND ADMIN LAIN
                 else if (['/admin', '/menu', '/start', 'menu', 'dashboard'].includes(lowerText)) {
                     await sendRealtimeDashboard(chatId, "🎛 <b>DASHBOARD UTAMA</b>");
                 }
-                
-                // 3. TRACKING ORDER (JIKA BUKAN COMMAND)
                 else if (!text.startsWith('/')) {
                     await trackOrder(chatId, text);
                 }
