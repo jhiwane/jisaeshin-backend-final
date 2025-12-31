@@ -103,23 +103,39 @@ module.exports = async function(req, res) {
             else if (data === 'ADMIN_REPORT') await handleDailyReport(chatId);
             else if (data === 'ADMIN_STOCK') await handleLowStockCheck(chatId);
 
-            // === B. CEK ORDER PENDING ===
+            // === B. CEK ORDER PENDING (ALL IN ONE) ===
+            // MODIFIKASI: Menampilkan SEMUA status pending dalam satu list
             else if (data === 'CHECK_PENDING') {
                 const snapshot = await db.collection('orders')
-                    .where('status', '==', 'manual_verification')
+                    .where('status', 'in', ['pending', 'manual_verification', 'manual_pending', 'process'])
                     .get();
 
                 if (snapshot.empty) {
-                    await sendMessage(chatId, "✅ <b>Aman!</b> Tidak ada orderan pending.");
+                    await sendMessage(chatId, "✅ <b>Aman!</b> Tidak ada orderan gantung.");
                 } else {
-                    let text = `⚠️ <b>${snapshot.size} ORDER PENDING:</b>\n`;
+                    let text = `⭕ <b>DAFTAR PENDING (${snapshot.size}):</b>\n\n`;
                     const keyboard = [];
+
                     snapshot.forEach(doc => {
                         const d = doc.data();
-                        text += `🆔 <code>${doc.id}</code> (${d.items.length} Item)\n`;
-                        keyboard.push([{ text: `🛠 Proses ${doc.id}`, callback_data: `ACC_${doc.id}` }]);
+                        const itemsCount = d.items ? d.items.length : 0;
+                        
+                        // Label status biar admin tau kenapa pending
+                        let statusLabel = '⚠️ CEK STOK/ERROR';
+                        if (d.status === 'manual_pending') statusLabel = '💸 BELUM ACC TRANSFER';
+                        if (d.status === 'pending') statusLabel = '⏳ MENUNGGU BAYAR';
+                        
+                        text += `🆔 <code>${doc.id}</code>\nStatus: ${statusLabel}\nItems: ${itemsCount} pcs\n\n`;
+                        
+                        // Tombol Dinamis
+                        if (d.status === 'manual_pending') {
+                            keyboard.push([{ text: `💸 ACC Transfer ${doc.id}`, callback_data: `ACC_${doc.id}` }]);
+                        } else {
+                            keyboard.push([{ text: `🛠 Proses Stok ${doc.id}`, callback_data: `ACC_${doc.id}` }]);
+                        }
                     });
-                    keyboard.push([{ text: "🔙 Kembali", callback_data: "ADMIN_MENU" }]);
+                    
+                    keyboard.push([{ text: "🔙 Tutup", callback_data: "DONE_MANUAL" }]);
                     await sendMessage(chatId, text, { reply_markup: { inline_keyboard: keyboard } });
                 }
                 await deleteMessage(chatId, messageId);
@@ -134,16 +150,15 @@ module.exports = async function(req, res) {
                 // 1. PROSES STOCK
                 const result = await processOrderStock(orderId);
 
-                // 2. PAKSA STATUS SUKSES
+                // 2. PAKSA STATUS SUKSES (Biar muncul di web user)
                 await db.collection('orders').doc(orderId).update({ status: 'success' });
                 await sendSuccessNotification(chatId, orderId, "PROCESSED");
 
-                // 3. TAMPILKAN MENU REVISI
+                // 3. TAMPILKAN MENU REVISI (Untuk isi yang kosong / cek data)
                 await showFlexibleRevisionMenu(chatId, orderId, result.items);
             }
 
             // === D. LOGIKA REVISI (DARI TOMBOL TRACKING) ===
-            // INI PENTING: Mengarahkan tombol "REVISI_" ke menu fleksibel yang baru
             else if (data.startsWith('REVISI_')) {
                 const orderId = data.replace('REVISI_', '');
                 const doc = await db.collection('orders').doc(orderId).get();
