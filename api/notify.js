@@ -5,58 +5,90 @@ const { sendRealtimeDashboard } = require('./adminRealtime');
 
 const ADMIN_CHAT_ID = '1383656187'; 
 
-// Fungsi Helper Item List
+// --- FUNGSI PEMOTONG TEKS PINTAR (AGAR TIDAK ERROR SAAT ORDER BANYAK) ---
 function buildItemsListSafe(items) {
     let itemsDetail = "";
-    const MAX_DISPLAY = 50; 
+    // Kita batasi tampilan detail maksimal 20 item agar tidak kena limit Telegram
+    // Sisa item akan diringkas.
+    const MAX_DISPLAY = 20; 
     
     if (items && Array.isArray(items)) {
         const displayItems = items.slice(0, MAX_DISPLAY);
-        displayItems.forEach(i => {
-            const safeName = (i.name || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            const safeNote = i.note ? `\n    📝 <i>Input: ${(i.note).replace(/&/g, '&amp;').replace(/</g, '&lt;')}</i>` : '';
-            itemsDetail += `📦 <b>${safeName}</b>\n    Qty: ${i.qty} x Rp${(parseInt(i.price)||0).toLocaleString()}${safeNote}\n`;
+        
+        displayItems.forEach((i, index) => {
+            // Bersihkan karakter aneh yg bikin error HTML Telegram
+            const safeName = (i.name || 'Item').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const safeNote = i.note ? ` <i>(${i.note})</i>` : '';
+            
+            // Format lebih ringkas: [1] Nama Barang (Qty)
+            itemsDetail += `${index+1}. <b>${safeName}</b> (x${i.qty})${safeNote}\n`;
         });
+
         if (items.length > MAX_DISPLAY) {
-            itemsDetail += `\n... <i>➕ Dan ${items.length - MAX_DISPLAY} item lainnya</i>\n`;
+            const sisa = items.length - MAX_DISPLAY;
+            itemsDetail += `\n📦 <i>...dan <b>${sisa} item lainnya</b> (Cek Web Admin untuk detail penuh)</i>\n`;
         }
     }
     return itemsDetail;
 }
 
+// --- FUNGSI KIRIM PESAN AMAN (ANTI ERROR 400) ---
+async function safeTelegramSend(chatId, text, options = {}) {
+    try {
+        await sendMessage(chatId, text, options);
+    } catch (error) {
+        console.error("GAGAL KIRIM TELEGRAM (Mungkin teks kepanjangan):", error.message);
+        // Jika gagal karena kepanjangan, kirim pesan pendek
+        try {
+            await sendMessage(chatId, "⚠️ <b>NOTIFIKASI ORDER BANYAK</b>\n\nData terlalu panjang untuk Telegram.\nSilakan cek langsung di Website/Aplikasi Admin.");
+        } catch (e) {}
+    }
+}
+
 module.exports = async function(req, res) {
     const payload = req.body;
     
-    // Ambil Order ID & Status dari berbagai kemungkinan sumber
+    // Log di Railway agar ketahuan kalau ada request masuk
+    console.log(`[NOTIFY] Masuk: Order ${payload.order_id || payload.orderId} | Type: ${payload.type}`);
+
+    // Normalisasi Data
     const orderId = payload.order_id || payload.orderId;
-    const type = payload.type; // manual, otomatis, complaint, pending, dll
-    const statusMidtrans = payload.transaction_status; // settlement, pending, expire
-    const statusPayload = payload.status; // process, pending (dari backend sendiri)
+    const type = payload.type; // manual, otomatis, saldo, complaint
+    const statusMidtrans = payload.transaction_status; 
+    const statusPayload = payload.status; 
 
     try {
-        // --- 1. CEK DATABASE DULU (Wajib ada) ---
+        // 1. CEK DATABASE (SUMBER KEBENARAN)
         const orderRef = db.collection('orders').doc(orderId);
         const orderSnap = await orderRef.get();
         
+        // Jika order belum masuk DB, tetap respon OK agar frontend tidak error
         if (!orderSnap.exists) {
-            return res.status(200).send('Order not found');
+            console.log(`[NOTIFY] Order ${orderId} tidak ditemukan di DB.`);
+            return res.status(200).send('Order not found yet');
         }
 
         const orderFromDb = orderSnap.data();
-        const finalItems = orderFromDb.items || payload.items;
+        // Gabungkan item dari payload atau DB
+        const finalItems = orderFromDb.items || payload.items || [];
         const itemsDetail = buildItemsListSafe(finalItems);
         const totalHarga = parseInt(payload.total || orderFromDb.total || 0).toLocaleString();
 
         // =================================================================
-        // LOGIKA NOTIFIKASI (DIBUAT LEBIH "PEKA")
+        // LOGIKA PENANGANAN STATUS
         // =================================================================
 
-        // KASUS A: PEMBAYARAN MANUAL (TRANSFER)
+        // KASUS A: PEMBAYARAN MANUAL (Tamu/Member Klik "Saya Sudah Bayar")
         if (type === 'manual') {
             const displayContact = payload.buyerContact ? `<code>${payload.buyerContact}</code>` : 'Guest';
-            const text = `💸 <b>PEMBAYARAN MANUAL MASUK</b>\n🆔 ID: <code>${orderId}</code>\n💰 Rp ${totalHarga}\n👤 ${displayContact}\n\n🛒 <b>Items:</b>\n${itemsDetail}`;
+            const text = `💸 <b>PEMBAYARAN MANUAL (TRANSFER)</b>\n\n` +
+                         `🆔 ID: <code>${orderId}</code>\n` +
+                         `💰 Rp ${totalHarga}\n` +
+                         `👤 ${displayContact}\n` +
+                         `📦 Total Item: ${finalItems.length} pcs\n\n` +
+                         `📝 <b>Daftar Barang:</b>\n${itemsDetail}`;
 
-            await sendMessage(ADMIN_CHAT_ID, text, {
+            await safeTelegramSend(ADMIN_CHAT_ID, text, {
                 reply_markup: {
                     inline_keyboard: [
                         [{ text: "✅ TERIMA (ACC)", callback_data: `ACC_${orderId}` }],
@@ -64,15 +96,15 @@ module.exports = async function(req, res) {
                     ]
                 }
             });
-            await sendRealtimeDashboard(ADMIN_CHAT_ID, "🔔 <i>Cek mutasi bank sekarang:</i>");
+            await sendRealtimeDashboard(ADMIN_CHAT_ID, "🔔 <i>Segera cek mutasi rekening!</i>");
         } 
         
-        // KASUS B: KOMPLAIN USER
+        // KASUS B: KOMPLAIN
         else if (type === 'complaint') {
              const complaintMsg = (payload.message || "-").replace(/&/g, '&amp;').replace(/</g, '&lt;');
              const text = `⚠️ <b>KOMPLAIN BARU</b>\n🆔 <code>${orderId}</code>\n💬 <pre>${complaintMsg}</pre>\n\n🛒 ${itemsDetail}`;
             
-             await sendMessage(ADMIN_CHAT_ID, text, {
+             await safeTelegramSend(ADMIN_CHAT_ID, text, {
                 reply_markup: {
                     inline_keyboard: [[{ text: "📩 BALAS PESAN", callback_data: `REPLY_CS_${orderId}` }]]
                 }
@@ -80,54 +112,59 @@ module.exports = async function(req, res) {
              await sendRealtimeDashboard(ADMIN_CHAT_ID, "ℹ️ <i>Status dashboard:</i>");
         }
 
-        // KASUS C: SUKSES / LUNAS (Midtrans Settlement / Saldo Otomatis)
-        else if (statusMidtrans === 'settlement' || statusMidtrans === 'capture' || type === 'otomatis' || statusPayload === 'success') {
-            // Coba ambil stok & kirim otomatis
+        // KASUS C: SUKSES / LUNAS 
+        // Mencakup: Midtrans Settlement, Pembayaran SALDO, atau Type Otomatis
+        else if (
+            statusMidtrans === 'settlement' || 
+            statusMidtrans === 'capture' || 
+            type === 'otomatis' || 
+            type === 'saldo' ||   // <--- PENTING: Bayar pakai saldo masuk sini
+            statusPayload === 'success'
+        ) {
+            console.log(`[NOTIFY] Memproses Stok untuk ${orderId}`);
+            
+            // Proses Stok Otomatis
             const result = await processOrderStock(orderId);
-            await sendSuccessNotification(ADMIN_CHAT_ID, orderId, "OTOMATIS");
+            
+            // Kirim Notif Sukses
+            await sendSuccessNotification(ADMIN_CHAT_ID, orderId, type === 'saldo' ? "SALDO MEMBER" : "OTOMATIS");
 
+            // Cek apakah stok lengkap atau ada yang kosong
             if (!result.success) {
-                // Jika stok kosong, Bot Lapor "BUTUH MANUAL"
-                const alertMsg = `⚠️ <b>STOK KOSONG (BUTUH MANUAL)</b>\nOrder ID: <code>${orderId}</code>\nStatus: Paid (Lunas), tapi stok di gudang kurang.`;
+                const alertMsg = `⚠️ <b>STOK KURANG (BUTUH MANUAL)</b>\nOrder ID: <code>${orderId}</code>\nItem banyak/stok habis.`;
                 await sendRealtimeDashboard(ADMIN_CHAT_ID, alertMsg);
                 await showManualInputMenu(ADMIN_CHAT_ID, orderId, result.items);
             }
         }
 
-        // KASUS D: PENDING / PROCESS / MENUNGGU BAYAR (SEMUA METODE)
-        // Ini jaring pengaman agar bot selalu lapor status gantung
+        // KASUS D: PENDING / PROCESS (Midtrans Pending / Checkout Baru)
         else if (
             statusMidtrans === 'pending' || 
             statusMidtrans === 'authorize' || 
             type === 'pending' || 
             type === 'process' || 
-            statusPayload === 'pending' || 
-            statusPayload === 'process'
+            statusPayload === 'pending'
         ) {
-            // Update status DB agar sinkron
+            // Update DB jadi pending
             await orderRef.update({ status: 'pending' });
 
-            // Tentukan Label Status
-            let labelStatus = "PENDING";
-            if (statusMidtrans) labelStatus = statusMidtrans.toUpperCase();
-            else if (type) labelStatus = type.toUpperCase();
+            // Deteksi label pembayaran
+            let via = "Midtrans/VA";
+            if (type === 'manual') via = "Transfer Manual";
+            if (type === 'saldo') via = "Saldo";
 
-            const pendingMsg = `⏳ <b>ORDER STATUS: ${labelStatus}</b>\n\n` +
+            const pendingMsg = `⏳ <b>ORDER PENDING (${via})</b>\n\n` +
                                `🆔 ID: <code>${orderId}</code>\n` +
                                `💰 Total: Rp ${totalHarga}\n` +
-                               `📦 Item: ${finalItems.length} pcs\n\n` +
-                               `<i>Bot memantau... Notifikasi akan muncul lagi saat status berubah Lunas/Gagal.</i>`;
+                               `📦 Jumlah Item: ${finalItems.length} pcs\n\n` +
+                               `<i>Bot menunggu pembayaran lunas...</i>`;
             
-            // KIRIM NOTIFIKASI DASHBOARD
             await sendRealtimeDashboard(ADMIN_CHAT_ID, pendingMsg);
         }
 
-        // KASUS E: MANUAL VERIFICATION / MACET (SEMUA METODE)
-        // Ini prioritas tinggi, biasanya stok habis atau error sistem
-        else if (type === 'manual_verification' || statusPayload === 'manual_verification' || orderFromDb.status === 'manual_verification') {
-             const alertMsg = `🔴 <b>BUTUH VERIFIKASI MANUAL!</b>\nOrder ID: <code>${orderId}</code>\n\nSistem menahan order ini (Stok habis / Error). Segera cek via tombol di bawah!`;
-             
-             // Pakai dashboard agar tombol RESOLVE muncul
+        // KASUS E: MANUAL VERIFICATION (Prioritas Tinggi)
+        else if (type === 'manual_verification' || orderFromDb.status === 'manual_verification') {
+             const alertMsg = `🔴 <b>BUTUH VERIFIKASI MANUAL!</b>\nOrder ID: <code>${orderId}</code>\nAda masalah stok/sistem pada order ini.`;
              await sendRealtimeDashboard(ADMIN_CHAT_ID, alertMsg);
         }
 
@@ -135,6 +172,12 @@ module.exports = async function(req, res) {
 
     } catch (e) {
         console.error("NOTIFY ERROR:", e.message); 
-        res.status(200).send('Error handeled');
+        // Tetap kirim 200 agar frontend/midtrans tidak retry terus menerus
+        res.status(200).send('Error handled');
+        
+        // Coba lapor error ke bot jika memungkinkan
+        try {
+            await sendMessage(ADMIN_CHAT_ID, `⚠️ <b>SYSTEM ERROR (Notify)</b>\nOrder: ${orderId}\nError: ${e.message}`);
+        } catch(err) {}
     }
 };
