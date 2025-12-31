@@ -20,7 +20,7 @@ async function deleteMessage(chatId, messageId) {
 async function showFlexibleRevisionMenu(chatId, orderId, items) {
     let message = `🛠 <b>MENU EDIT / REVISI DATA</b>\nOrder ID: <code>${orderId}</code>\n\n` +
                   `Silakan klik item di bawah ini untuk melihat atau mengubah isinya.\n` +
-                  `<i>(Berguna jika ada data salah kirim atau ingin revisi sebagian)</i>\n`;
+                  `<i>(Berguna jika ada komplain produk cacat atau salah kirim)</i>\n`;
     
     const keyboard = [];
 
@@ -28,10 +28,7 @@ async function showFlexibleRevisionMenu(chatId, orderId, items) {
     items.forEach((item, index) => {
         // Cek status isi
         const isFilled = item.data && item.data.length > 0;
-        
-        // Ikon Status
         const icon = isFilled ? "✅" : "❌";
-        const statusText = isFilled ? "Terisi" : "KOSONG";
         
         // Nama Item (dipotong biar rapi)
         let itemName = item.name.length > 15 ? item.name.substring(0, 15) + '...' : item.name;
@@ -50,6 +47,43 @@ async function showFlexibleRevisionMenu(chatId, orderId, items) {
     keyboard.push([{ text: "✅ Selesai / Tutup Menu", callback_data: "DONE_MANUAL" }]);
 
     await sendMessage(chatId, message, { reply_markup: { inline_keyboard: keyboard } });
+}
+
+// --- FUNGSI BARU: TRACKING ORDER ---
+async function trackOrder(chatId, orderId) {
+    const doc = await db.collection('orders').doc(orderId).get();
+    
+    if (!doc.exists) {
+        return sendMessage(chatId, `❌ <b>TIDAK DITEMUKAN</b>\nOrder ID <code>${orderId}</code> tidak ada di database.`);
+    }
+
+    const d = doc.data();
+    const statusIcon = d.status === 'success' ? '✅' : d.status === 'pending' ? '⏳' : d.status === 'failed' ? '❌' : '⚠️';
+    const total = parseInt(d.total || 0).toLocaleString();
+    const contact = d.buyerContact || "Guest";
+    
+    let itemsList = "";
+    (d.items || []).forEach((i, idx) => {
+        const statusItem = (i.data && i.data.length > 0) ? "✅" : "❌";
+        itemsList += `${idx+1}. ${statusItem} <b>${i.name}</b> (${i.qty})\n`;
+    });
+
+    const msg = `🔍 <b>HASIL TRACKING</b>\n\n` +
+                `🆔 ID: <code>${doc.id}</code>\n` +
+                `📊 Status: <b>${statusIcon} ${d.status.toUpperCase()}</b>\n` +
+                `💰 Total: Rp ${total}\n` +
+                `👤 Kontak: ${contact}\n\n` +
+                `📦 <b>Rincian Item:</b>\n${itemsList}\n` +
+                `👇 <i>Klik tombol di bawah untuk Edit/Lihat Data Produk:</i>`;
+
+    await sendMessage(chatId, msg, {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "🛠 Edit / Revisi Data (Komplain)", callback_data: `REVISI_${doc.id}` }],
+                [{ text: "🔙 Tutup", callback_data: "DONE_MANUAL" }]
+            ]
+        }
+    });
 }
 
 module.exports = async function(req, res) {
@@ -91,12 +125,11 @@ module.exports = async function(req, res) {
                 await deleteMessage(chatId, messageId);
             }
 
-            // === C. LOGIKA ACC / RESOLVE (HAJAR DULU BARU REVISI) ===
+            // === C. LOGIKA ACC / RESOLVE ===
             else if (data.startsWith('ACC_') || data.startsWith('RESOLVE_')) {
                 const orderId = data.replace('ACC_', '').replace('RESOLVE_', '');
-                
                 await deleteMessage(chatId, messageId);
-                await sendMessage(chatId, "⏳ <i>Memproses stok & update database...</i>");
+                await sendMessage(chatId, "⏳ <i>Memproses stok...</i>");
 
                 // 1. PROSES STOCK
                 const result = await processOrderStock(orderId);
@@ -105,11 +138,21 @@ module.exports = async function(req, res) {
                 await db.collection('orders').doc(orderId).update({ status: 'success' });
                 await sendSuccessNotification(chatId, orderId, "PROCESSED");
 
-                // 3. TAMPILKAN MENU REVISI (TAMPIL SEMUA ITEM)
+                // 3. TAMPILKAN MENU REVISI
                 await showFlexibleRevisionMenu(chatId, orderId, result.items);
             }
+
+            // === D. LOGIKA REVISI (DARI TOMBOL TRACKING) ===
+            // INI PENTING: Mengarahkan tombol "REVISI_" ke menu fleksibel yang baru
+            else if (data.startsWith('REVISI_')) {
+                const orderId = data.replace('REVISI_', '');
+                const doc = await db.collection('orders').doc(orderId).get();
+                if (doc.exists) {
+                    await showFlexibleRevisionMenu(chatId, orderId, doc.data().items);
+                }
+            }
             
-            // === D. LOGIKA INPUT ITEM / EDIT (FILL) ===
+            // === E. LOGIKA INPUT / EDIT ITEM (FILL) ===
             else if (data.startsWith('FILL_')) {
                 const parts = data.split('_');
                 const orderId = parts[1];
@@ -121,13 +164,13 @@ module.exports = async function(req, res) {
                 const item = orderDoc.data().items[itemIdx];
                 const variantInfo = item.variation_name || item.variant || '-';
                 
-                // LOGIKA BARU: TAMPILKAN DATA LAMA JIKA ADA
+                // Tampilkan Data Lama
                 let extraMsg = "";
                 if (item.data && item.data.length > 0) {
                     const dataLama = item.data.join('\n');
                     extraMsg = `📂 <b>DATA SAAT INI (Klik untuk Copy):</b>\n` +
                                `<code>${dataLama}</code>\n\n` +
-                               `👆 <i>Copy teks di atas, edit bagian yang salah (misal no 7), lalu kirimkan versi lengkapnya ke sini.</i>\n\n`;
+                               `👆 <i>Copy teks di atas, edit yang salah, lalu kirim versi barunya.</i>\n\n`;
                 }
 
                 await sendMessage(chatId, 
@@ -140,7 +183,6 @@ module.exports = async function(req, res) {
                     { reply_markup: { force_reply: true } }
                 );
 
-                // Simpan Context
                 await db.collection('admin_context').doc(chatId.toString()).set({
                     action: 'WAITING_MANUAL_INPUT', 
                     orderId: orderId, 
@@ -148,10 +190,10 @@ module.exports = async function(req, res) {
                 });
             }
 
-            // === E. TOMBOL LAINNYA ===
+            // === F. TOMBOL LAINNYA ===
             else if (data === 'DONE_MANUAL') {
                 await deleteMessage(chatId, messageId);
-                await sendMessage(chatId, "✅ Menu Edit Ditutup.");
+                await sendMessage(chatId, "✅ Menu Ditutup.");
             }
             else if (data.startsWith('REJECT_')) {
                 const orderId = data.replace('REJECT_', '');
@@ -168,27 +210,25 @@ module.exports = async function(req, res) {
             }
         } 
 
-        // --- 2. LOGIKA TEXT INPUT (INPUT DATA) ---
+        // --- 2. LOGIKA PESAN TEKS (COMMAND & TRACKING) ---
         else if (update.message && update.message.text) {
             const chatId = update.message.chat.id;
-            const text = update.message.text;
+            const text = update.message.text.trim(); // Hapus spasi depan/belakang
             
             const contextSnap = await db.collection('admin_context').doc(chatId.toString()).get();
             
             if (contextSnap.exists) {
                 const context = contextSnap.data();
 
-                // INPUT MANUAL / EDIT (DARI MENU REVISI)
+                // INPUT MANUAL / EDIT
                 if (context.action === 'WAITING_MANUAL_INPUT') {
                     const { orderId, itemIdx } = context;
                     const dataArray = text.split('\n').map(x => x.trim()).filter(x => x);
                     
-                    // 1. Simpan Data ke DB (MENIMPA DATA LAMA)
                     await db.runTransaction(async (t) => {
                         const ref = db.collection('orders').doc(orderId);
                         const doc = await t.get(ref);
                         if(!doc.exists) return;
-                        
                         const items = doc.data().items;
                         
                         if(items[itemIdx]) {
@@ -197,21 +237,14 @@ module.exports = async function(req, res) {
                             items[itemIdx].desc = dataArray.join('\n');
                             items[itemIdx].manualInputTime = new Date().toISOString();
                         }
-                        
                         t.update(ref, { items: items });
                     });
 
-                    // 2. Hapus Context
                     await db.collection('admin_context').doc(chatId.toString()).delete();
-
-                    // 3. AUTO-REFRESH MENU REVISI
+                    
                     const updatedDoc = await db.collection('orders').doc(orderId).get();
-                    const updatedItems = updatedDoc.data().items;
-                    
                     await sendMessage(chatId, `✅ Item #${itemIdx+1} Berhasil Diupdate!`);
-                    
-                    // Tampilkan lagi menu (Tombol ✅ tetap muncul agar bisa diedit lagi kalau mau)
-                    await showFlexibleRevisionMenu(chatId, orderId, updatedItems);
+                    await showFlexibleRevisionMenu(chatId, orderId, updatedDoc.data().items);
                 }
 
                 // BALAS KOMPLAIN
@@ -226,8 +259,21 @@ module.exports = async function(req, res) {
                     await sendMessage(chatId, `✅ Balasan terkirim.`);
                     await db.collection('admin_context').doc(chatId.toString()).delete();
                 }
-            } else {
-                if (['/admin', '/menu', '/start'].includes(text)) await sendRealtimeDashboard(chatId, "🎛 <b>DASHBOARD</b>");
+            } 
+            
+            // JIKA TIDAK ADA CONTEXT -> CEK APAKAH INI PERINTAH TRACKING?
+            else {
+                // Jika user mengetik /admin, /menu, dll
+                if (['/admin', '/menu', '/start'].includes(text.toLowerCase())) {
+                    await sendRealtimeDashboard(chatId, "🎛 <b>DASHBOARD</b>");
+                }
+                
+                // === LOGIKA TRACKING (Cukup kirim Order ID) ===
+                // Syarat: Bukan command '/', dan panjangnya wajar (misal TRX-...)
+                else if (!text.startsWith('/')) {
+                    // Anggap admin sedang mencoba mencari Order ID
+                    await trackOrder(chatId, text);
+                }
             }
         }
     } catch (e) {
